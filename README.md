@@ -16,7 +16,7 @@
 
 ---
 
-##⭐Features⭐
+## ⭐Features⭐
 
 * **🎨 Custom Color Palettes:** Includes 6 dark-mode color themes (*Slate Blue, Burnt Orange, Crimson Red, Pastel Pink, Forest Green, Deep Purple*).
 * **Aesthetic Layout:** Custom retro style theme, minimalist layout and display brightness adjustments.
@@ -26,7 +26,7 @@
 
 ---
 
-##🛠️Hardware🛠️
+## 🛠️Hardware🛠️
 
 | Component | Module Name |
 | :--- | :--- |
