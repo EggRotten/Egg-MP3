@@ -2,7 +2,7 @@
 
 # 🥚 Egg-MP3
 
-**A retro-styled, highly customizable ESP32 handheld audio player.**
+**A retro-styled, highly customizable ESP32 handheld audio player based on the Snowsky Echo Mini/Nano.**
 
 [![ESP32](https://img.shields.io/badge/Hardware-ESP32--1732S019N-orange?style=for-the-badge&logo=espressif)](https://www.espressif.com/)
 [![Arduino](https://img.shields.io/badge/Framework-Arduino_GFX-blue?style=for-the-badge&logo=arduino)](https://github.com/moononournation/Arduino_GFX)
@@ -10,7 +10,7 @@
 
 ---
 
-*Compact MP3 player powered by the ESP32-1732S019N display module, PCM5102A I2S DAC, and a KV-40 rotary encoder input.*
+*Compact MP3 player based on the ESP32-1732S019N display module AKA "The Cheap Yellow Display".*
 
 </div>
 
