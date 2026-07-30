@@ -1,5 +1,3 @@
-# Egg-MP3
-An ESP32-1732S019N based MP3 Player
 <div align="center">
 
 # 🥚 Egg-MP3
@@ -11,3 +9,82 @@ An ESP32-1732S019N based MP3 Player
 [![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
 
 ---
+
+*Compact MP3 player powered by the ESP32-1732S019N display module, PCM5102A I2S DAC, and a KV-40 rotary encoder input.*
+
+</div>
+
+---
+
+##⭐Features⭐
+
+* **🎨 Custom Color Palettes:** Includes 6 dark-mode color themes (*Slate Blue, Burnt Orange, Crimson Red, Pastel Pink, Forest Green, Deep Purple*).
+* **Aesthetic Layout:** Custom retro style theme, minimalist layout and display brightness adjustments.
+* **(Planned) Tactile Input:** Native rotary encoder navigation with debounced step movement and long-press detection.
+* **(Planned) 3.5mm Audio Output:** High-quality audio playback via **PCM5102A I2S DAC** module.
+* **(Planned) SD Card required:** Auto-scans root directory for `.mp3` tracks with real-time scrolling lists.
+
+---
+
+##🛠️Hardware🛠️
+
+| Component | Module Name |
+| :--- | :--- |
+| **Microcontroller** | ESP32-1732S019N (170x320 ST7789 Display) |
+| **Audio DAC** | **PCM5102A I2S DAC Module** (*GY-PCM5102*) |
+| **Input Encoder** | **KY-040 Rotary Encoder Module** |
+| **Storage** | **MicroSD Card Reader (SPI)** |
+| **Battery Charger** | **Type-C USB 5V 2A Boost Converter Step-Up Power Module** |
+| **LI-PO Battery** | **18650 3.7V 2600mAH LI-ION battery** |
+---
+
+## Pinout Mapping
+
+### PCM5102A I2S DAC
+| Module Pin | ESP32 Pin | Function |
+| :--- | :--- | :--- |
+| **BCK** | `GPIO26` | Bit Clock |
+| **LRCK / LCK** | `GPIO25` | Left/Right Clock (Word Select) |
+| **DIN** | `GPIO22` | Data Input |
+| **VCC** | `5V` / `3.3V` | Power Supply |
+| **GND** | `GND` | Ground |
+
+###  KY-040 Rotary Encoder
+| Module Pin | ESP32 Pin | Function |
+| :--- | :--- | :--- |
+| **CLK** | `GPIO32` | Encoder Clock Signal |
+| **DT** | `GPIO33` | Encoder Data Signal |
+| **SW** | `GPIO27` | Pushbutton Switch |
+| **VCC / +** | `3.3V` | Power Supply |
+| **GND** | `GND` | Ground |
+
+### Display (ST7789) & SD Card (SPI)
+* `TFT_BL`: **IO21** | `TFT_CS`: **IO15** | `TFT_DC`: **IO2** | `TFT_RST`: **IO4**
+* `TFT_SCLK`: **IO14** | `TFT_MOSI`: **IO13** | `SD_CS`: **IO5**
+
+---
+
+## 🎮Controls🎮
+
+* **Turn Knob:** Scroll through catalog lists, adjust volume, or change brightness levels.
+* **Short Press:** Select menu item / confirm setting.
+* **Long Press (0.5s):** Return to previous menu / Main Menu.
+
+---
+
+## 💻 Dependencies 💻
+
+Ensure you have the following libraries installed in your Arduino IDE / PlatformIO environment:
+
+* [Arduino_GFX_Library](https://github.com/moononournation/Arduino_GFX)
+* [ESP32-audioI2S](https://github.com/schreibfaul1/ESP32-audioI2S)
+* `SPI.h`
+* `SD.h`
+
+---
+
+<div align="center">
+
+*Created with C++ / Arduino Framework for ESP32.*
+
+</div>
