@@ -36,14 +36,14 @@ struct Palette {
   uint16_t textMuted; // Subtext / unselected
 };
 
-// 6 Custom Muted Dark-Mode Palettes
+// Reverted Dark-Mode Palettes with Legible Muted Text on Green, Orange, Red, Pink, Purple
 Palette palettes[] = {
-  {"Muted Slate Blue", 0x0008, 0x0111, 0x2B33, 0x0150, 0x73F5, 0x12F0},
-  {"Burnt Orange",     0x1000, 0x2080, 0xCA60, 0x3100, 0xFD60, 0x6180},
-  {"Crimson Red",      0x1000, 0x2000, 0x9000, 0x3000, 0xF980, 0x5000},
-  {"Dusty Pink",       0x1002, 0x2004, 0x98A9, 0x3006, 0xFA54, 0x500A},
-  {"Forest Green",     0x0080, 0x0100, 0x2324, 0x0180, 0x75A7, 0x1180},
-  {"Deep Purple",      0x0802, 0x1004, 0x51A9, 0x1806, 0xAA55, 0x3008}
+  {"Muted Slate Blue", 0x0008, 0x0111, 0x2B33, 0x0150, 0x73F5, 0x12F0}, // Exact original restored
+  {"Burnt Orange",     0x1000, 0x2080, 0xCA60, 0x3100, 0xFD60, 0xAD20}, // Restored dark theme + readable muted
+  {"Crimson Red",      0x1000, 0x2000, 0x9000, 0x3000, 0xF980, 0xA285}, // Restored dark theme + readable muted
+  {"Pastel Pink",      0x1002, 0x2004, 0xF5B5, 0x400A, 0xFCEF, 0xC353}, // Dark Mode Pastel Pink
+  {"Forest Green",     0x0080, 0x0100, 0x2324, 0x0180, 0x75A7, 0x34A6}, // Restored dark theme + readable muted
+  {"Deep Purple",      0x0802, 0x1004, 0x51A9, 0x1806, 0xAA55, 0x6B0F}  // Restored dark theme + readable muted
 };
 
 int currentPaletteIdx = 0; // Default to Blue
@@ -86,7 +86,7 @@ bool buttonActive = false;
 // Function Declarations
 void renderCurrentScreen();
 void drawHeader(const char* title);
-void drawProgressBar(int x, int y, int w, int h, int val, int maxVal, uint16_t bgCol, uint16_t fillCol);
+void drawTextProgressBar(int x, int y, int val, int maxVal, int barLength, uint16_t textColor);
 void drawSmugEgg(int cx, int cy);
 void scanSDCatalog();
 void playTrack(int index);
@@ -271,18 +271,30 @@ void drawSmugEgg(int cx, int cy) {
   gfx->drawLine(cx + 8, cy + 15, cx + 14, cy + 10, COLOR_PRIMARY);
 }
 
-// Clean flat progress bar renderer with no concave corner artifacts
-void drawProgressBar(int x, int y, int w, int h, int val, int maxVal, uint16_t bgCol, uint16_t fillCol) {
-  gfx->fillRect(x, y, w, h, bgCol);
-
-  if (val <= 0) return;
-
-  int fillW = map(val, 0, maxVal, 0, w);
-  fillW = constrain(fillW, 0, w);
-
-  if (fillW > 0) {
-    gfx->fillRect(x, y, fillW, h, fillCol);
+// Text-Based Progress Bar: Dynamically scales to match value range exactly
+void drawTextProgressBar(int x, int y, int val, int maxVal, int barLength, uint16_t textColor) {
+  int filledLen = 0;
+  if (val > 0 && maxVal > 0) {
+    filledLen = (val * barLength) / maxVal;
+    filledLen = constrain(filledLen, 0, barLength);
   }
+
+  String barStr = "[";
+  for (int i = 0; i < barLength; i++) {
+    if (i < filledLen - 1) {
+      barStr += "=";
+    } else if (i == filledLen - 1) {
+      barStr += ">";
+    } else {
+      barStr += "-";
+    }
+  }
+  barStr += "]";
+
+  gfx->setTextSize(1);
+  gfx->setTextColor(textColor);
+  gfx->setCursor(x, y);
+  gfx->print(barStr);
 }
 
 void renderCurrentScreen() {
@@ -302,7 +314,6 @@ void renderCurrentScreen() {
         gfx->drawRoundRect(10, y, 150, 32, 6, COLOR_PRIMARY);
       }
       
-      // Standard size 1 text rendered cleanly inside the card box
       gfx->setTextSize(1);
       gfx->setTextColor(txtCol);
       gfx->setCursor(20, y + 12);
@@ -366,22 +377,21 @@ void renderCurrentScreen() {
     gfx->setTextColor(COLOR_TEXT_MUTED);
     gfx->printf("Vol: %d / 21\n", currentVolume);
     
-    // Volume Progress Bar
-    drawProgressBar(10, 190, 150, 16, currentVolume, 21, COLOR_CARD, COLOR_PRIMARY);
+    // Exact 21-character bar for Volume
+    drawTextProgressBar(16, 192, currentVolume, 21, 21, COLOR_TEXT);
   } 
   else if (currentState == SETTINGS) {
     drawHeader("Settings");
 
-    // Brightness Level Bar
+    // Brightness Level Label
     gfx->setTextSize(1);
     gfx->setTextColor(settingsIndex == 0 ? COLOR_TEXT : COLOR_TEXT_MUTED);
     gfx->setCursor(12, 48);
     gfx->println("Brightness Level:");
 
-    drawProgressBar(10, 62, 150, 18, brightness, 255, COLOR_CARD, COLOR_PRIMARY);
-    if (settingsIndex == 0) {
-      gfx->drawRect(10, 62, 150, 18, COLOR_PRIMARY);
-    }
+    // 20-character bar for Brightness Level
+    uint16_t barColor = (settingsIndex == 0) ? COLOR_TEXT : COLOR_TEXT_MUTED;
+    drawTextProgressBar(18, 64, brightness, 255, 20, barColor);
 
     // Palette Switcher
     gfx->setTextColor(settingsIndex == 1 ? COLOR_TEXT : COLOR_TEXT_MUTED);
