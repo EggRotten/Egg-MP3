@@ -4,7 +4,7 @@
 #include <SD.h>
 #include "Audio.h"
 
-// --- DISPLAY PINS ---
+// pcb display pins
 #define TFT_BL   21
 #define TFT_CS   15
 #define TFT_DC    2
@@ -12,43 +12,42 @@
 #define TFT_SCLK 14
 #define TFT_MOSI 13
 
-// --- SD CARD PINS (HSPI) ---
+// sd card pins (HSPI) ---
 #define SD_CS    5
 
-// --- PCM5102A I2S DAC PINS ---
+// audio jack I2S pins (PCM5102A)---
 #define I2S_BCK  26
 #define I2S_LCK  25
 #define I2S_DIN  22
 
-// --- ROTARY ENCODER PINS (KV-40) ---
+// rot encoder pins (KV-40)
 #define ROTARY_CLK 32
 #define ROTARY_DT  33
 #define ROTARY_SW  27
 
-// --- COLOR PALETTE SYSTEM (RGB565) ---
+// color palette system ( using RGB565)
 struct Palette {
   const char* name;
   uint16_t bg;
   uint16_t card;
   uint16_t primary;   // Main theme color
-  uint16_t header;    // Header bar background
+  uint16_t header;    // Header bar
   uint16_t text;      // High visibility text
-  uint16_t textMuted; // Subtext / unselected
+  uint16_t textMuted; // Subtext/unselected
 };
 
-// Reverted Dark-Mode Palettes with Legible Muted Text on Green, Orange, Red, Pink, Purple
+// custom palettes
 Palette palettes[] = {
-  {"Muted Slate Blue", 0x0008, 0x0111, 0x2B33, 0x0150, 0x73F5, 0x12F0}, // Exact original restored
-  {"Burnt Orange",     0x1000, 0x2080, 0xCA60, 0x3100, 0xFD60, 0xAD20}, // Restored dark theme + readable muted
-  {"Crimson Red",      0x1000, 0x2000, 0x9000, 0x3000, 0xF980, 0xA285}, // Restored dark theme + readable muted
-  {"Pastel Pink",      0x1002, 0x2004, 0xF5B5, 0x400A, 0xFCEF, 0xC353}, // Dark Mode Pastel Pink
-  {"Forest Green",     0x0080, 0x0100, 0x2324, 0x0180, 0x75A7, 0x34A6}, // Restored dark theme + readable muted
-  {"Deep Purple",      0x0802, 0x1004, 0x51A9, 0x1806, 0xAA55, 0x6B0F}  // Restored dark theme + readable muted
-};
+  {"Slate Blue", 0x0008, 0x0111, 0x2B33, 0x0150, 0x73F5, 0x12F0},
+  {"Burnt Orange",     0x1000, 0x2080, 0xCA60, 0x3100, 0xFD60, 0xC2A4},
+  {"Crimson Red",      0x1000, 0x2000, 0x9000, 0x3000, 0xF980, 0xC246},
+  {"Pastel Pink",      0x1002, 0x2004, 0xF576, 0x400A, 0xFB77, 0xC353},
+  {"Forest Green",     0x0080, 0x0100, 0x2324, 0x0180, 0x75A7, 0x34A6},
+  {"Deep Purple",      0x0802, 0x1004, 0x51A9, 0x1806, 0xAA55, 0x8A19} 
 
-int currentPaletteIdx = 0; // Default to Blue
+int currentPaletteIdx = 0; // default is blue (personal fav)
 
-// Helper Macros for Theme Colors
+// helper functions for theme colors
 #define COLOR_BG          palettes[currentPaletteIdx].bg
 #define COLOR_CARD        palettes[currentPaletteIdx].card
 #define COLOR_PRIMARY     palettes[currentPaletteIdx].primary
@@ -56,34 +55,34 @@ int currentPaletteIdx = 0; // Default to Blue
 #define COLOR_TEXT        palettes[currentPaletteIdx].text
 #define COLOR_TEXT_MUTED  palettes[currentPaletteIdx].textMuted
 
-// Display & Audio Instances
+// display and audio instances
 Arduino_DataBus *bus = new Arduino_ESP32SPI(TFT_DC, TFT_CS, TFT_SCLK, TFT_MOSI, GFX_NOT_DEFINED, VSPI);
 Arduino_GFX *gfx = new Arduino_ST7789(bus, TFT_RST, 0 /* Portrait */, true, 170, 320, 35, 0, 0, 0);
 Audio audio;
 
-// UI State Management
+// UI state managing
 enum ScreenState { MENU_MAIN, CATALOG_LIST, NOW_PLAYING, SETTINGS };
 ScreenState currentState = MENU_MAIN;
 
 int menuIndex = 0;
 int maxMenuIndex = 2;
 int settingsIndex = 0; // 0 = Brightness, 1 = Palette
-int brightness = 180;  // PWM 0-255
+int brightness = 180;  // 0-255
 int currentVolume = 12; // 0-21
 
-// SD Card File Catalog Variables
+// sd card file catalog variables
 #define MAX_FILES 30
 String mp3Files[MAX_FILES];
 int fileCount = 0;
 int fileIndex = 0;
 String currentTrackName = "No Track Loaded";
 
-// Encoder Hardware Tracking State
+// encoder hardware state tracking
 int lastClkVal = HIGH;
 unsigned long buttonPressTime = 0;
 bool buttonActive = false;
 
-// Function Declarations
+// declaring funcs
 void renderCurrentScreen();
 void drawHeader(const char* title);
 void drawTextProgressBar(int x, int y, int val, int maxVal, int barLength, uint16_t textColor);
@@ -96,21 +95,21 @@ void setup() {
   Serial.begin(115200);
   delay(500);
 
-  // 1. Backlight Setup
+  // 1. backlight setup (This stupid fucking shit took so fucking long to get working)
   pinMode(TFT_BL, OUTPUT);
   analogWrite(TFT_BL, brightness);
 
-  // 2. Display Setup
+  // 2. display setup
   gfx->begin();
   gfx->fillScreen(COLOR_BG);
 
-  // 3. Encoder Pins
+  // 3. encoder pin setup
   pinMode(ROTARY_CLK, INPUT_PULLUP);
   pinMode(ROTARY_DT, INPUT_PULLUP);
   pinMode(ROTARY_SW, INPUT_PULLUP);
   lastClkVal = digitalRead(ROTARY_CLK);
 
-  // 4. SD Card Setup
+  // 4. sd card setup
   if (!SD.begin(SD_CS)) {
     Serial.println("[ERROR] SD Card Mount Failed!");
   } else {
@@ -118,13 +117,13 @@ void setup() {
     scanSDCatalog();
   }
 
-  // 5. Audio Output Setup
+  // 5. audio output setup
   audio.setPinout(I2S_BCK, I2S_LCK, I2S_DIN);
   audio.setVolume(currentVolume);
 
   renderCurrentScreen();
 
-  // Serial Monitor Startup Message
+  // serial monitor setup
   Serial.println("\n==========================================");
   Serial.println("           EGG MP3 PLAYER ACTIVE          ");
   Serial.println("==========================================");
@@ -135,19 +134,19 @@ void setup() {
 void loop() {
   audio.loop();
 
-  // --- 1. PHYSICAL ROTARY ENCODER INPUT ---
+  // physical rot encoder input
   int currentClk = digitalRead(ROTARY_CLK);
   
   if (currentClk != lastClkVal && currentClk == LOW) {
     if (digitalRead(ROTARY_DT) != currentClk) {
-      handleCommand('d'); // Rotate Right
+      handleCommand('d'); // rot right
     } else {
-      handleCommand('u'); // Rotate Left
+      handleCommand('u'); // rot left
     }
   }
   lastClkVal = currentClk;
 
-  // Encoder Switch Logic (Short Click vs. Long Press)
+  // encoder switch logic
   int swVal = digitalRead(ROTARY_SW);
   if (swVal == LOW) {
     if (!buttonActive) {
@@ -166,14 +165,14 @@ void loop() {
     }
   }
 
-  // --- 2. SERIAL MONITOR CONTROL INPUT ---
+  // serial monitor control input
   if (Serial.available()) {
     char cmd = Serial.read();
     handleCommand(cmd);
   }
 }
 
-// Global Command Dispatcher
+// global command dispatcher
 void handleCommand(char cmd) {
   if (cmd == 'u') { // Up / Previous / Increase
     if (currentState == MENU_MAIN) {
@@ -191,7 +190,7 @@ void handleCommand(char cmd) {
         brightness = constrain(brightness + 25, 25, 255);
         analogWrite(TFT_BL, brightness);
       } else {
-        settingsIndex = 0; // Move selection to Brightness
+        settingsIndex = 0; // move selection to brightness
       }
     }
     renderCurrentScreen();
@@ -212,12 +211,12 @@ void handleCommand(char cmd) {
         brightness = constrain(brightness - 25, 25, 255);
         analogWrite(TFT_BL, brightness);
       } else {
-        settingsIndex = 1; // Move selection to Theme Palette
+        settingsIndex = 1; // Move selection to palette theme
       }
     }
     renderCurrentScreen();
   } 
-  else if (cmd == 's') { // Select
+  else if (cmd == 's') { // select
     if (currentState == MENU_MAIN) {
       if (menuIndex == 0) currentState = CATALOG_LIST;
       else if (menuIndex == 1) currentState = NOW_PLAYING;
@@ -242,7 +241,7 @@ void handleCommand(char cmd) {
   }
 }
 
-// --- UI DRAWING FUNCTIONS ---
+// ui drawing funcs
 
 void drawHeader(const char* title) {
   gfx->fillRect(0, 0, 170, 38, COLOR_HEADER);
@@ -253,16 +252,16 @@ void drawHeader(const char* title) {
   gfx->drawFastHLine(0, 38, 170, COLOR_PRIMARY);
 }
 
-// Minimal vector egg: Pure outline & facial features (NO SHADING)
+// smug egg graphic lmao
 void drawSmugEgg(int cx, int cy) {
   // Pure Outer Oval Outline
   gfx->drawEllipse(cx, cy, 30, 36, COLOR_PRIMARY);
 
-  // Left Smug Eye
+  // Left eye
   gfx->drawLine(cx - 18, cy - 8, cx - 6, cy - 5, COLOR_TEXT);
   gfx->fillCircle(cx - 12, cy - 2, 3, COLOR_TEXT);
 
-  // Right Smug Eye
+  // Right eye
   gfx->drawLine(cx + 6, cy - 5, cx + 18, cy - 8, COLOR_TEXT);
   gfx->fillCircle(cx + 12, cy - 2, 3, COLOR_TEXT);
 
@@ -271,7 +270,7 @@ void drawSmugEgg(int cx, int cy) {
   gfx->drawLine(cx + 8, cy + 15, cx + 14, cy + 10, COLOR_PRIMARY);
 }
 
-// Text-Based Progress Bar: Dynamically scales to match value range exactly
+// Text-Based Progress Bar: Dynamically scales to match value range exactly (Imma be honest i used ai on this part)
 void drawTextProgressBar(int x, int y, int val, int maxVal, int barLength, uint16_t textColor) {
   int filledLen = 0;
   if (val > 0 && maxVal > 0) {
@@ -320,7 +319,7 @@ void renderCurrentScreen() {
       gfx->print(options[i]);
     }
 
-    // --- DRAW SMUG EGG OUTLINE LOWER ON SCREEN ---
+    // drawing that smug egg
     drawSmugEgg(85, 248);
   } 
   else if (currentState == CATALOG_LIST) {
@@ -358,13 +357,13 @@ void renderCurrentScreen() {
   else if (currentState == NOW_PLAYING) {
     drawHeader("Player");
 
-    // Vinyl Record Graphic
+    // the vynil record
     gfx->fillCircle(85, 100, 38, COLOR_CARD);
     gfx->drawCircle(85, 100, 38, COLOR_PRIMARY);
     gfx->fillCircle(85, 100, 12, COLOR_HEADER);
     gfx->fillCircle(85, 100, 4, COLOR_BG);
 
-    // Track Name
+    // track name
     gfx->setTextSize(1);
     gfx->setTextColor(COLOR_TEXT);
     gfx->setCursor(12, 152);
@@ -372,24 +371,24 @@ void renderCurrentScreen() {
     if (title.length() > 22) title = title.substring(0, 19) + "...";
     gfx->println(title);
 
-    // Volume Text Label
+    // volume text label
     gfx->setCursor(12, 174);
     gfx->setTextColor(COLOR_TEXT_MUTED);
     gfx->printf("Vol: %d / 21\n", currentVolume);
     
-    // Exact 21-character bar for Volume
+    // 21 char vol bar
     drawTextProgressBar(16, 192, currentVolume, 21, 21, COLOR_TEXT);
   } 
   else if (currentState == SETTINGS) {
     drawHeader("Settings");
 
-    // Brightness Level Label
+    // brightness level label
     gfx->setTextSize(1);
     gfx->setTextColor(settingsIndex == 0 ? COLOR_TEXT : COLOR_TEXT_MUTED);
     gfx->setCursor(12, 48);
     gfx->println("Brightness Level:");
 
-    // 20-character bar for Brightness Level
+    // 20  char brightness bar
     uint16_t barColor = (settingsIndex == 0) ? COLOR_TEXT : COLOR_TEXT_MUTED;
     drawTextProgressBar(18, 64, brightness, 255, 20, barColor);
 
@@ -407,7 +406,7 @@ void renderCurrentScreen() {
     gfx->setCursor(18, 121);
     gfx->println(palettes[currentPaletteIdx].name);
 
-    // Control Guide
+    // controls guide
     gfx->setCursor(12, 158);
     gfx->setTextColor(COLOR_TEXT_MUTED);
     gfx->println("Turn: Scroll/Val");
@@ -418,7 +417,7 @@ void renderCurrentScreen() {
   }
 }
 
-// Scan SD Root for MP3s
+// scan SD root for MP3
 void scanSDCatalog() {
   File root = SD.open("/");
   fileCount = 0;
