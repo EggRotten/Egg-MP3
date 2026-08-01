@@ -16,17 +16,17 @@
 
 ---
 
-## ⭐Features⭐
+## ⭐ Features ⭐
 
 * **🎨 Custom Color Palettes:** Includes 6 dark-mode color themes (*Slate Blue, Burnt Orange, Crimson Red, Pastel Pink, Forest Green, Deep Purple*).
 * **Aesthetic Layout:** Custom retro style theme, minimalist layout and display brightness adjustments.
-* **(Planned) Tactile Input:** Native rotary encoder navigation with debounced step movement and long-press detection.
-* **(Planned) 3.5mm Audio Output:** High-quality audio playback via **PCM5102A I2S DAC** module.
-* **(Planned) SD Card required:** Auto-scans root directory for `.mp3` tracks with real-time scrolling lists.
+* **Tactile Input:** Native rotary encoder navigation with debounced step movement and long-press detection.
+* **3.5mm Audio Output:** High-quality audio playback via **PCM5102A I2S DAC** module.
+* **SD Card Integration:** Auto-scans root directory for `.mp3` tracks with real-time scrolling lists.
 
 ---
 
-## 🛠️Hardware🛠️
+## 🛠️ Hardware 🛠️
 
 | Component | Module Name |
 | :--- | :--- |
@@ -34,11 +34,12 @@
 | **Audio DAC** | **PCM5102A I2S DAC Module** (*GY-PCM5102*) |
 | **Input Encoder** | **KY-040 Rotary Encoder Module** |
 | **Storage** | **MicroSD Card Reader (SPI)** |
-| **Battery Charger** | **Type-C USB 5V 2A Boost Converter Step-Up Power Module** |
-| **LI-PO Battery** | **18650 3.7V 2600mAH LI-ION battery** |
+| **Battery Charger** | **TP4056 USB Lithium Battery Charger & Protection Module** |
+| **LI-PO Battery** | **18650 3.7V 2600mAh LI-ION Battery** |
+
 ---
 
-## Pinout Mapping
+## 📌 Pinout Mapping
 
 ### PCM5102A I2S DAC
 | Module Pin | ESP32 Pin | Function |
@@ -46,10 +47,10 @@
 | **BCK** | `GPIO26` | Bit Clock |
 | **LRCK / LCK** | `GPIO25` | Left/Right Clock (Word Select) |
 | **DIN** | `GPIO22` | Data Input |
-| **VCC** | `5V` / `3.3V` | Power Supply |
+| **VCC** | `3.3V` | Power Supply |
 | **GND** | `GND` | Ground |
 
-###  KY-040 Rotary Encoder
+### KY-040 Rotary Encoder
 | Module Pin | ESP32 Pin | Function |
 | :--- | :--- | :--- |
 | **CLK** | `GPIO32` | Encoder Clock Signal |
@@ -58,13 +59,21 @@
 | **VCC / +** | `3.3V` | Power Supply |
 | **GND** | `GND` | Ground |
 
-### Display (ST7789) & SD Card (SPI)
-* `TFT_BL`: **IO21** | `TFT_CS`: **IO15** | `TFT_DC`: **IO2** | `TFT_RST`: **IO4**
-* `TFT_SCLK`: **IO14** | `TFT_MOSI`: **IO13** | `SD_CS`: **IO5**
+### Display (ST7789) & SD Card (SPI Bus Shared)
+| Pin Description | ESP32 Pin |
+| :--- | :--- |
+| **Display Backlight (TFT_BL)** | `GPIO21` |
+| **Display Chip Select (TFT_CS)** | `GPIO15` |
+| **Display Data/Command (TFT_DC)** | `GPIO2` |
+| **Display Reset (TFT_RST)** | `GPIO4` |
+| **SPI Clock (SCLK / SCK)** | `GPIO14` *(Shared with SD Card)* |
+| **SPI MOSI (MOSI / SDA)** | `GPIO13` *(Shared with SD Card)* |
+| **SD Card Chip Select (SD_CS)** | `GPIO5` |
+| **SD Card MISO** | `GPIO12` |
 
 ---
 
-## 🎮Controls🎮
+## 🎮 Controls 🎮
 
 * **Turn Knob:** Scroll through catalog lists, adjust volume, or change brightness levels.
 * **Short Press:** Select menu item / confirm setting.
