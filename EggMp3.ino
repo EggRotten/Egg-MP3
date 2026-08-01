@@ -38,14 +38,15 @@ struct Palette {
 
 // custom palettes
 Palette palettes[] = {
-  {"Slate Blue", 0x0008, 0x0111, 0x2B33, 0x0150, 0x73F5, 0x12F0},
-  {"Burnt Orange",     0x1000, 0x2080, 0xCA60, 0x3100, 0xFD60, 0xC2A4},
-  {"Crimson Red",      0x1000, 0x2000, 0x9000, 0x3000, 0xF980, 0xC246},
-  {"Pastel Pink",      0x1002, 0x2004, 0xF576, 0x400A, 0xFB77, 0xC353},
-  {"Forest Green",     0x0080, 0x0100, 0x2324, 0x0180, 0x75A7, 0x34A6},
-  {"Deep Purple",      0x0802, 0x1004, 0x51A9, 0x1806, 0xAA55, 0x8A19} 
+  {"Slate Blue",   0x0002, 0x0088, 0x2B33, 0x00A0, 0x73F5, 0x12F0},
+  {"Burnt Orange", 0x1000, 0x2080, 0xCA60, 0x3100, 0xFD60, 0xC2A4},
+  {"Crimson Red",  0x1000, 0x2000, 0x9000, 0x3000, 0xF980, 0xC246},
+  {"Pastel Pink",  0x1002, 0x2004, 0xF576, 0x400A, 0xFB77, 0xC353},
+  {"Forest Green", 0x0040, 0x0100, 0x2324, 0x00C0, 0x75A7, 0x34A6}, // Ultra-dark forest green BG
+  {"Deep Purple",  0x0802, 0x1004, 0x51A9, 0x1806, 0x71D5, 0xAA55}  
+};
 
-int currentPaletteIdx = 0; // default is blue (personal fav)
+int currentPaletteIdx = 0; // default is blue
 
 // helper functions for theme colors
 #define COLOR_BG          palettes[currentPaletteIdx].bg
@@ -56,7 +57,7 @@ int currentPaletteIdx = 0; // default is blue (personal fav)
 #define COLOR_TEXT_MUTED  palettes[currentPaletteIdx].textMuted
 
 // display and audio instances
-Arduino_DataBus *bus = new Arduino_ESP32SPI(TFT_DC, TFT_CS, TFT_SCLK, TFT_MOSI, GFX_NOT_DEFINED, VSPI);
+Arduino_DataBus *bus = new Arduino_ESP32SPI(TFT_DC, TFT_CS, TFT_SCLK, TFT_MOSI, GFX_NOT_DEFINED, HSPI);
 Arduino_GFX *gfx = new Arduino_ST7789(bus, TFT_RST, 0 /* Portrait */, true, 170, 320, 35, 0, 0, 0);
 Audio audio;
 
@@ -70,6 +71,12 @@ int settingsIndex = 0; // 0 = Brightness, 1 = Palette
 int brightness = 180;  // 0-255
 int currentVolume = 12; // 0-21
 
+// track progress & animation variables
+uint32_t trackCurrentTime = 0;
+uint32_t trackTotalTime = 0;
+int vinylFrame = 0;
+unsigned long lastAnimTime = 0;
+
 // sd card file catalog variables
 #define MAX_FILES 30
 String mp3Files[MAX_FILES];
@@ -77,16 +84,20 @@ int fileCount = 0;
 int fileIndex = 0;
 String currentTrackName = "No Track Loaded";
 
-// encoder hardware state tracking
+// encoder hardware state tracking & debounce
 int lastClkVal = HIGH;
 unsigned long buttonPressTime = 0;
 bool buttonActive = false;
+unsigned long lastEncoderTime = 0;
+const unsigned long ENCODER_DEBOUNCE_MS = 50; 
 
 // declaring funcs
 void renderCurrentScreen();
 void drawHeader(const char* title);
 void drawTextProgressBar(int x, int y, int val, int maxVal, int barLength, uint16_t textColor);
+void drawLargeBrackets(int x, int y, int w, int h, uint16_t color);
 void drawSmugEgg(int cx, int cy);
+void drawRealisticVinyl(int cx, int cy, bool isPlaying);
 void scanSDCatalog();
 void playTrack(int index);
 void handleCommand(char cmd);
@@ -95,7 +106,7 @@ void setup() {
   Serial.begin(115200);
   delay(500);
 
-  // 1. backlight setup (This stupid fucking shit took so fucking long to get working)
+  // 1. backlight setup
   pinMode(TFT_BL, OUTPUT);
   analogWrite(TFT_BL, brightness);
 
@@ -134,19 +145,37 @@ void setup() {
 void loop() {
   audio.loop();
 
-  // physical rot encoder input
+  // Animation & vinyl rotation update
+  if (currentState == NOW_PLAYING) {
+    bool isPlaying = audio.isRunning();
+    if (isPlaying) {
+      trackCurrentTime = audio.getAudioCurrentTime();
+      trackTotalTime = audio.getAudioFileDuration();
+
+      if (millis() - lastAnimTime > 150) {
+        lastAnimTime = millis();
+        vinylFrame = (vinylFrame + 1) % 4;
+        renderCurrentScreen();
+      }
+    }
+  }
+
+  // Physical rotary encoder input with debounce
   int currentClk = digitalRead(ROTARY_CLK);
   
   if (currentClk != lastClkVal && currentClk == LOW) {
-    if (digitalRead(ROTARY_DT) != currentClk) {
-      handleCommand('d'); // rot right
-    } else {
-      handleCommand('u'); // rot left
+    if (millis() - lastEncoderTime > ENCODER_DEBOUNCE_MS) {
+      lastEncoderTime = millis();
+      if (digitalRead(ROTARY_DT) != currentClk) {
+        handleCommand('d'); 
+      } else {
+        handleCommand('u'); 
+      }
     }
   }
   lastClkVal = currentClk;
 
-  // encoder switch logic
+  // Encoder switch logic
   int swVal = digitalRead(ROTARY_SW);
   if (swVal == LOW) {
     if (!buttonActive) {
@@ -165,7 +194,7 @@ void loop() {
     }
   }
 
-  // serial monitor control input
+  // Serial monitor control input
   if (Serial.available()) {
     char cmd = Serial.read();
     handleCommand(cmd);
@@ -244,33 +273,110 @@ void handleCommand(char cmd) {
 // ui drawing funcs
 
 void drawHeader(const char* title) {
-  gfx->fillRect(0, 0, 170, 38, COLOR_HEADER);
-  gfx->setTextColor(COLOR_TEXT);
+  // Title bar line ends 2/3 of the way across (113px out of 170px)
+  gfx->drawFastHLine(0, 31, 113, COLOR_PRIMARY);
+
   gfx->setTextSize(2);
-  gfx->setCursor(10, 10);
-  gfx->print(title);
-  gfx->drawFastHLine(0, 38, 170, COLOR_PRIMARY);
+  gfx->setTextColor(COLOR_TEXT);
+  gfx->setCursor(6, 8);
+  gfx->printf("> %s", title);
+
+  // Status indicators
+  gfx->fillRect(145, 10, 5, 5, COLOR_PRIMARY);
+  gfx->drawRect(154, 10, 5, 5, COLOR_PRIMARY);
 }
 
-// smug egg graphic lmao
+// Draw Thicker & Brighter Pixel Brackets [ ] around items
+void drawLargeBrackets(int x, int y, int w, int h, uint16_t color) {
+  // Left Bracket '['
+  gfx->fillRect(x, y, 2, h, color);
+  gfx->fillRect(x, y, 5, 2, color);
+  gfx->fillRect(x, y + h - 2, 5, 2, color);
+
+  // Right Bracket ']'
+  gfx->fillRect(x + w - 2, y, 2, h, color);
+  gfx->fillRect(x + w - 5, y, 5, 2, color);
+  gfx->fillRect(x + w - 5, y + h - 2, 5, 2, color);
+}
+
+// Significantly Larger Smug Egg Mascot (Fills lower half)
 void drawSmugEgg(int cx, int cy) {
-  // Pure Outer Oval Outline
-  gfx->drawEllipse(cx, cy, 30, 36, COLOR_PRIMARY);
+  gfx->drawEllipse(cx, cy, 56, 64, COLOR_TEXT);
+  gfx->drawEllipse(cx, cy, 55, 63, COLOR_TEXT);
 
-  // Left eye
-  gfx->drawLine(cx - 18, cy - 8, cx - 6, cy - 5, COLOR_TEXT);
-  gfx->fillCircle(cx - 12, cy - 2, 3, COLOR_TEXT);
+  // Scaled Left eye
+  gfx->drawLine(cx - 34, cy - 14, cx - 12, cy - 8, COLOR_TEXT);
+  gfx->fillCircle(cx - 22, cy - 3, 6, COLOR_TEXT);
 
-  // Right eye
-  gfx->drawLine(cx + 6, cy - 5, cx + 18, cy - 8, COLOR_TEXT);
-  gfx->fillCircle(cx + 12, cy - 2, 3, COLOR_TEXT);
+  // Scaled Right eye
+  gfx->drawLine(cx + 12, cy - 8, cx + 34, cy - 14, COLOR_TEXT);
+  gfx->fillCircle(cx + 22, cy - 3, 6, COLOR_TEXT);
 
-  // Smug Smirk
-  gfx->drawLine(cx - 4, cy + 12, cx + 8, cy + 15, COLOR_PRIMARY);
-  gfx->drawLine(cx + 8, cy + 15, cx + 14, cy + 10, COLOR_PRIMARY);
+  // Scaled Smug Smirk
+  gfx->drawLine(cx - 8, cy + 22, cx + 18, cy + 28, COLOR_TEXT);
+  gfx->drawLine(cx + 18, cy + 28, cx + 28, cy + 16, COLOR_TEXT);
 }
 
-// Text-Based Progress Bar: Dynamically scales to match value range exactly (Imma be honest i used ai on this part)
+// Larger Vinyl Record with Clean Crisp Center Label
+void drawRealisticVinyl(int cx, int cy, bool isPlaying) {
+  // Base dark record body fill
+  gfx->fillCircle(cx, cy, 54, COLOR_BG);
+  
+  // Outer rim lines
+  gfx->drawCircle(cx, cy, 54, COLOR_TEXT);
+  gfx->drawCircle(cx, cy, 53, COLOR_PRIMARY);
+  
+  // Inner groove rings (using textMuted for clean contrast)
+  gfx->drawCircle(cx, cy, 46, COLOR_TEXT_MUTED);
+  gfx->drawCircle(cx, cy, 38, COLOR_TEXT_MUTED);
+  gfx->drawCircle(cx, cy, 30, COLOR_TEXT_MUTED);
+  gfx->drawCircle(cx, cy, 22, COLOR_TEXT_MUTED);
+
+  // Spinning Reflection Highlights
+  if (isPlaying) {
+    switch (vinylFrame) {
+      case 0:
+        gfx->drawLine(cx - 42, cy - 20, cx - 16, cy - 8, COLOR_TEXT);
+        gfx->drawLine(cx + 16, cy + 8, cx + 42, cy + 20, COLOR_TEXT);
+        break;
+      case 1:
+        gfx->drawLine(cx - 20, cy - 42, cx - 8, cy - 16, COLOR_TEXT);
+        gfx->drawLine(cx + 8, cy + 16, cx + 20, cy + 42, COLOR_TEXT);
+        break;
+      case 2:
+        gfx->drawLine(cx + 20, cy - 42, cx + 8, cy - 16, COLOR_TEXT);
+        gfx->drawLine(cx - 8, cy + 16, cx - 20, cy + 42, COLOR_TEXT);
+        break;
+      case 3:
+        gfx->drawLine(cx + 42, cy - 20, cx + 16, cy - 8, COLOR_TEXT);
+        gfx->drawLine(cx - 16, cy + 8, cx - 42, cy + 20, COLOR_TEXT);
+        break;
+    }
+  } else {
+    gfx->drawLine(cx - 42, cy - 20, cx - 16, cy - 8, COLOR_TEXT_MUTED);
+  }
+
+  // Refined Crisp Center Label & Spindle Hole (No muddy mixed colors!)
+  gfx->fillCircle(cx, cy, 14, COLOR_PRIMARY);
+  gfx->drawCircle(cx, cy, 14, COLOR_TEXT);
+  gfx->drawCircle(cx, cy, 6, COLOR_TEXT);
+  gfx->fillCircle(cx, cy, 3, COLOR_BG);
+
+  // Tonearm Base & Cartridge
+  gfx->fillCircle(cx + 62, cy - 48, 6, COLOR_PRIMARY);
+
+  if (isPlaying) {
+    gfx->drawLine(cx + 62, cy - 48, cx + 42, cy - 22, COLOR_TEXT);
+    gfx->drawLine(cx + 42, cy - 22, cx + 20, cy - 6, COLOR_TEXT);
+    gfx->fillRect(cx + 15, cy - 9, 6, 6, COLOR_PRIMARY);
+  } else {
+    gfx->drawLine(cx + 62, cy - 48, cx + 66, cy - 16, COLOR_TEXT_MUTED);
+    gfx->drawLine(cx + 66, cy - 16, cx + 64, cy + 16, COLOR_TEXT_MUTED);
+    gfx->fillRect(cx + 61, cy + 14, 6, 6, COLOR_TEXT_MUTED);
+  }
+}
+
+// Progress Bar Style: [======>-----]
 void drawTextProgressBar(int x, int y, int val, int maxVal, int barLength, uint16_t textColor) {
   int filledLen = 0;
   if (val > 0 && maxVal > 0) {
@@ -278,60 +384,58 @@ void drawTextProgressBar(int x, int y, int val, int maxVal, int barLength, uint1
     filledLen = constrain(filledLen, 0, barLength);
   }
 
-  String barStr = "[";
-  for (int i = 0; i < barLength; i++) {
-    if (i < filledLen - 1) {
-      barStr += "=";
-    } else if (i == filledLen - 1) {
-      barStr += ">";
-    } else {
-      barStr += "-";
-    }
-  }
-  barStr += "]";
-
   gfx->setTextSize(1);
   gfx->setTextColor(textColor);
   gfx->setCursor(x, y);
-  gfx->print(barStr);
+  gfx->print("[");
+
+  for (int i = 0; i < barLength; i++) {
+    if (i < filledLen - 1) {
+      gfx->print("="); 
+    } else if (i == filledLen - 1) {
+      gfx->print(">"); 
+    } else {
+      gfx->print("-"); 
+    }
+  }
+  gfx->print("]");
 }
 
 void renderCurrentScreen() {
   gfx->fillScreen(COLOR_BG);
 
   if (currentState == MENU_MAIN) {
-    drawHeader("Egg MP3");
+    drawHeader("EGG MP3");
     
-    const char* options[] = {"MP3 Catalog", "Now Playing", "Settings"};
+    const char* options[] = {"SD CATALOG", "NOW PLAYING", "SYSTEM SETTINGS"};
     for (int i = 0; i < 3; i++) {
-      int y = 50 + (i * 38);
-      uint16_t boxCol = (i == menuIndex) ? COLOR_HEADER : COLOR_CARD;
-      uint16_t txtCol = (i == menuIndex) ? COLOR_TEXT : COLOR_TEXT_MUTED;
-      
-      gfx->fillRoundRect(10, y, 150, 32, 6, boxCol);
-      if (i == menuIndex) {
-        gfx->drawRoundRect(10, y, 150, 32, 6, COLOR_PRIMARY);
-      }
-      
+      int y = 44 + (i * 26);
       gfx->setTextSize(1);
-      gfx->setTextColor(txtCol);
-      gfx->setCursor(20, y + 12);
-      gfx->print(options[i]);
+      
+      if (i == menuIndex) {
+        drawLargeBrackets(8, y - 3, 152, 16, COLOR_TEXT);
+        gfx->setTextColor(COLOR_TEXT);
+        gfx->setCursor(16, y);
+        gfx->printf("%d. %s", i + 1, options[i]);
+      } else {
+        gfx->setTextColor(COLOR_TEXT_MUTED);
+        gfx->setCursor(16, y);
+        gfx->printf("%d. %s", i + 1, options[i]);
+      }
     }
 
-    // drawing that smug egg
-    drawSmugEgg(85, 248);
+    drawSmugEgg(85, 238);
   } 
   else if (currentState == CATALOG_LIST) {
-    drawHeader("Catalog");
+    drawHeader("SD LIST");
 
     if (fileCount == 0) {
       gfx->setTextColor(COLOR_TEXT_MUTED);
       gfx->setTextSize(1);
-      gfx->setCursor(12, 65);
-      gfx->println("No MP3 files found");
-      gfx->setCursor(12, 80);
-      gfx->println("on SD card!");
+      gfx->setCursor(14, 60);
+      gfx->println("[!] NO MP3 FOUND");
+      gfx->setCursor(14, 76);
+      gfx->println("    CHECK SD CARD");
       return;
     }
 
@@ -339,81 +443,114 @@ void renderCurrentScreen() {
     int end = min(fileCount, start + 5);
 
     for (int i = start; i < end; i++) {
-      int y = 50 + ((i - start) * 32);
+      int y = 52 + ((i - start) * 32);
+      gfx->setTextSize(1);
+      
+      String displayName = mp3Files[i];
+      if (displayName.length() > 16) displayName = displayName.substring(0, 13) + "...";
+
       if (i == fileIndex) {
-        gfx->fillRoundRect(8, y, 154, 28, 4, COLOR_HEADER);
-        gfx->drawRoundRect(8, y, 154, 28, 4, COLOR_PRIMARY);
+        drawLargeBrackets(6, y - 3, 156, 16, COLOR_TEXT);
         gfx->setTextColor(COLOR_TEXT);
+        gfx->setCursor(14, y);
+        gfx->print(displayName);
       } else {
         gfx->setTextColor(COLOR_TEXT_MUTED);
+        gfx->setCursor(14, y);
+        gfx->print(displayName);
       }
-      gfx->setTextSize(1);
-      gfx->setCursor(14, y + 10);
-      String displayName = mp3Files[i];
-      if (displayName.length() > 20) displayName = displayName.substring(0, 17) + "...";
-      gfx->println(displayName);
     }
+    
+    // Bottom status info
+    gfx->drawFastHLine(10, 290, 150, COLOR_PRIMARY);
+    gfx->setTextColor(COLOR_TEXT_MUTED);
+    gfx->setCursor(14, 298);
+    gfx->printf("FILES: %02d/%02d", fileIndex + 1, fileCount);
   } 
   else if (currentState == NOW_PLAYING) {
-    drawHeader("Player");
+    drawHeader("AUDIO RX");
 
-    // the vynil record
-    gfx->fillCircle(85, 100, 38, COLOR_CARD);
-    gfx->drawCircle(85, 100, 38, COLOR_PRIMARY);
-    gfx->fillCircle(85, 100, 12, COLOR_HEADER);
-    gfx->fillCircle(85, 100, 4, COLOR_BG);
+    bool isPlaying = audio.isRunning();
 
-    // track name
+    // Centered Vinyl shifted slightly left to cx = 80
+    drawRealisticVinyl(80, 102, isPlaying);
+    
+    // Track Name Info
     gfx->setTextSize(1);
+    gfx->setTextColor(COLOR_TEXT_MUTED);
+    gfx->setCursor(14, 178);
+    gfx->println(isPlaying ? "[PLAYING]" : "[STOPPED]");
+    
     gfx->setTextColor(COLOR_TEXT);
-    gfx->setCursor(12, 152);
+    gfx->setCursor(14, 194);
     String title = currentTrackName;
-    if (title.length() > 22) title = title.substring(0, 19) + "...";
+    if (title.length() > 20) title = title.substring(0, 17) + "...";
     gfx->println(title);
 
-    // volume text label
-    gfx->setCursor(12, 174);
-    gfx->setTextColor(COLOR_TEXT_MUTED);
-    gfx->printf("Vol: %d / 21\n", currentVolume);
-    
-    // 21 char vol bar
-    drawTextProgressBar(16, 192, currentVolume, 21, 21, COLOR_TEXT);
+    // Volume Percentage HUD
+    int volPercent = map(currentVolume, 0, 21, 0, 100);
+    gfx->setCursor(14, 218);
+    gfx->setTextColor(COLOR_TEXT);
+    gfx->printf("VOL: %d%%\n", volPercent);
+
+    // Progress bar
+    if (isPlaying) {
+      gfx->setCursor(14, 240);
+      gfx->setTextColor(COLOR_TEXT_MUTED);
+      gfx->println("TRACK PROGRESS:");
+      
+      drawTextProgressBar(14, 254, trackCurrentTime, trackTotalTime > 0 ? trackTotalTime : 1, 18, COLOR_TEXT);
+    }
   } 
   else if (currentState == SETTINGS) {
-    drawHeader("Settings");
+    drawHeader("CONFIG");
 
-    // brightness level label
+    // Brightness Setting
     gfx->setTextSize(1);
-    gfx->setTextColor(settingsIndex == 0 ? COLOR_TEXT : COLOR_TEXT_MUTED);
-    gfx->setCursor(12, 48);
-    gfx->println("Brightness Level:");
-
-    // 20  char brightness bar
-    uint16_t barColor = (settingsIndex == 0) ? COLOR_TEXT : COLOR_TEXT_MUTED;
-    drawTextProgressBar(18, 64, brightness, 255, 20, barColor);
-
-    // Palette Switcher
-    gfx->setTextColor(settingsIndex == 1 ? COLOR_TEXT : COLOR_TEXT_MUTED);
-    gfx->setCursor(12, 98);
-    gfx->println("Theme Palette:");
-
-    gfx->fillRoundRect(10, 112, 150, 28, 6, COLOR_CARD);
-    if (settingsIndex == 1) {
-      gfx->drawRoundRect(10, 112, 150, 28, 6, COLOR_PRIMARY);
+    if (settingsIndex == 0) {
+      drawLargeBrackets(8, 48, 152, 16, COLOR_TEXT);
+      gfx->setTextColor(COLOR_TEXT);
+      gfx->setCursor(16, 51);
+      gfx->print("BL LEVEL");
+    } else {
+      gfx->setTextColor(COLOR_TEXT_MUTED);
+      gfx->setCursor(16, 51);
+      gfx->print("BL LEVEL");
     }
-    
+
+    drawTextProgressBar(16, 71, brightness, 255, 18, settingsIndex == 0 ? COLOR_TEXT : COLOR_TEXT_MUTED);
+
+    // Palette Theme
+    if (settingsIndex == 1) {
+      drawLargeBrackets(8, 102, 152, 16, COLOR_TEXT);
+      gfx->setTextColor(COLOR_TEXT);
+      gfx->setCursor(16, 105);
+      gfx->print("PALETTE THEME");
+    } else {
+      gfx->setTextColor(COLOR_TEXT_MUTED);
+      gfx->setCursor(16, 105);
+      gfx->print("PALETTE THEME");
+    }
+
     gfx->setTextColor(COLOR_TEXT);
-    gfx->setCursor(18, 121);
+    gfx->setCursor(16, 123);
     gfx->println(palettes[currentPaletteIdx].name);
 
-    // controls guide
-    gfx->setCursor(12, 158);
+    // Terminal Keybindings Guide
+    gfx->drawFastHLine(10, 168, 150, COLOR_PRIMARY);
+    gfx->setTextColor(COLOR_TEXT);
+    gfx->setCursor(14, 178);
+    gfx->println("[KEYBINDS]");
+
     gfx->setTextColor(COLOR_TEXT_MUTED);
-    gfx->println("Turn: Scroll/Val");
-    gfx->setCursor(12, 175);
-    gfx->println("Push: Select");
-    gfx->setCursor(12, 192);
-    gfx->println("Hold: Back");
+    gfx->setCursor(14, 201);
+    gfx->println("DIAL : NAV / ADJUST");
+    gfx->setCursor(14, 221);
+    gfx->println("PRESS: EXECUTE");
+    gfx->setCursor(14, 241);
+    gfx->println("HOLD : BACK / ESC");
+    gfx->setCursor(14, 261);
+    gfx->println("SYS  : EGG OS v1.0");
   }
 }
 
