@@ -33,7 +33,7 @@
 | **Microcontroller** | ESP32-1732S019N (170x320 ST7789 Display) |
 | **Audio DAC** | **PCM5102A I2S DAC Module** (*GY-PCM5102*) |
 | **Input Encoder** | **KY-040 Rotary Encoder Module** |
-| **Storage** | **MicroSD Card Reader (SPI)** |
+| **Storage** | **MicroSD Card Reader (VSPI)** |
 | **Battery Charger** | **TP4056 USB Lithium Battery Charger & Protection Module** |
 | **LI-PO Battery** | **18650 3.7V 2600mAh LI-ION Battery** |
 
@@ -59,17 +59,25 @@
 | **VCC / +** | `3.3V` | Power Supply |
 | **GND** | `GND` | Ground |
 
-### Display (ST7789) & SD Card (SPI Bus Shared)
+### Display (ST7789) - HSPI Bus
 | Pin Description | ESP32 Pin |
 | :--- | :--- |
 | **Display Backlight (TFT_BL)** | `GPIO21` |
 | **Display Chip Select (TFT_CS)** | `GPIO15` |
 | **Display Data/Command (TFT_DC)** | `GPIO2` |
 | **Display Reset (TFT_RST)** | `GPIO4` |
-| **SPI Clock (SCLK / SCK)** | `GPIO14` *(Shared with SD Card)* |
-| **SPI MOSI (MOSI / SDA)** | `GPIO13` *(Shared with SD Card)* |
-| **SD Card Chip Select (SD_CS)** | `GPIO5` |
-| **SD Card MISO** | `GPIO12` |
+| **SPI Clock (TFT_SCLK)** | `GPIO14` |
+| **SPI MOSI (TFT_MOSI)** | `GPIO13` |
+
+### SD Card Reader - Dedicated VSPI Bus (Independent)
+| SD Card Pin | ESP32 Pin | Function |
+| :--- | :--- | :--- |
+| **SCK** | `GPIO18` | VSPI Clock |
+| **MISO** | `GPIO19` | VSPI Master In Slave Out |
+| **MOSI** | `GPIO23` | VSPI Master Out Slave In |
+| **CS** | `GPIO5` | Chip Select |
+| **VCC** | `3.3V` | Power Supply |
+| **GND** | `GND` | Ground |
 
 ---
 
