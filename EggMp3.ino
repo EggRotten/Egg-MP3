@@ -12,13 +12,13 @@
 #define TFT_SCLK 14
 #define TFT_MOSI 13
 
-// sd card pins (vspi bus - completely separate from display)
+// sd card pins (vspi bus)
 #define SD_SCK   18
 #define SD_MISO  19
 #define SD_MOSI  23
 #define SD_CS     5
 
-// audio jack i2s pins (pcm5102a)---
+// audio jack i2s pins (pcm5102a)
 #define I2S_BCK  26
 #define I2S_LCK  25
 #define I2S_DIN  22
@@ -28,30 +28,28 @@
 #define ROTARY_DT  33
 #define ROTARY_SW  27
 
-// color palette system ( using rgb565)
+// color palette system
 struct Palette {
   const char* name;
   uint16_t bg;
   uint16_t card;
-  uint16_t primary;   // main theme color
-  uint16_t header;    // header bar
-  uint16_t text;      // high visibility text
-  uint16_t textMuted; // subtext/unselected
+  uint16_t primary;   
+  uint16_t header;    
+  uint16_t text;      
+  uint16_t textMuted; 
 };
 
-// custom palettes
 Palette palettes[] = {
   {"Slate Blue",   0x0002, 0x0088, 0x2B33, 0x00A0, 0x73F5, 0x12F0},
   {"Burnt Orange", 0x1000, 0x2080, 0xCA60, 0x3100, 0xFD60, 0xC2A4},
   {"Crimson Red",  0x1000, 0x2000, 0x9000, 0x3000, 0xF980, 0xC246},
   {"Pastel Pink",  0x1002, 0x2004, 0xF576, 0x400A, 0xFB77, 0xC353},
-  {"Forest Green", 0x0040, 0x0100, 0x2324, 0x00C0, 0x75A7, 0x34A6}, // ultra-dark forest green bg
+  {"Forest Green", 0x0040, 0x0100, 0x2324, 0x00C0, 0x75A7, 0x34A6},
   {"Deep Purple",  0x0802, 0x1004, 0x51A9, 0x1806, 0x71D5, 0xAA55}  
 };
 
-int currentPaletteIdx = 0; // default is blue
+int currentPaletteIdx = 0;
 
-// helper functions for theme colors
 #define COLOR_BG          palettes[currentPaletteIdx].bg
 #define COLOR_CARD        palettes[currentPaletteIdx].card
 #define COLOR_PRIMARY     palettes[currentPaletteIdx].primary
@@ -59,114 +57,153 @@ int currentPaletteIdx = 0; // default is blue
 #define COLOR_TEXT        palettes[currentPaletteIdx].text
 #define COLOR_TEXT_MUTED  palettes[currentPaletteIdx].textMuted
 
-// display and audio instances
 Arduino_DataBus *bus = new Arduino_ESP32SPI(TFT_DC, TFT_CS, TFT_SCLK, TFT_MOSI, GFX_NOT_DEFINED, HSPI);
 Arduino_GFX *gfx = new Arduino_ST7789(bus, TFT_RST, 0 /* Portrait */, true, 170, 320, 35, 0, 0, 0);
 Audio audio;
 
-// ui state managing
-enum ScreenState { MENU_MAIN, CATALOG_LIST, NOW_PLAYING, SETTINGS };
+enum ScreenState { MENU_MAIN, CATALOG_LIST, SONG_DETAIL, NOW_PLAYING, SETTINGS };
 ScreenState currentState = MENU_MAIN;
 
 int menuIndex = 0;
 int maxMenuIndex = 2;
-int settingsIndex = 0; // 0 = brightness, 1 = palette
-int brightness = 180;  // 0-255
-int currentVolume = 12; // 0-21
+int settingsIndex = 0; 
+int brightness = 180;  
+int currentVolume = 12; 
+bool isShuffle = false;
 
-// track progress & animation variables
+enum PlayerControl { CTRL_SEEK_BAR, CTRL_PREV, CTRL_PLAY_PAUSE, CTRL_NEXT, CTRL_SHUFFLE, CTRL_VOL };
+int playerControlIndex = 0;
+const int maxPlayerControls = 6;
+bool isSeekingMode = false;
+uint32_t seekTargetTime = 0;
+
 uint32_t trackCurrentTime = 0;
 uint32_t trackTotalTime = 0;
 int vinylFrame = 0;
 unsigned long lastAnimTime = 0;
+const unsigned long VINYL_SPEED_MS = 1000;
 
-// sd card file catalog variables
-#define MAX_FILES 30
-String mp3Files[MAX_FILES];
+unsigned long lastScrollTime = 0;
+int scrollOffset = 0;
+
+// DAC Diagnostic tracking flags
+bool isDacWorking = true;
+bool playbackAttempted = false;
+unsigned long dacCheckTimer = 0;
+
+struct TrackInfo {
+  String filename;
+  String artist;
+  String title;
+  uint32_t sizeBytes;
+};
+
+#define MAX_FILES 50
+TrackInfo mp3Catalog[MAX_FILES];
 int fileCount = 0;
 int fileIndex = 0;
-String currentTrackName = "No Track Loaded";
+int detailSubIndex = 0; 
+String currentTrackName = "N/A";
 
-// encoder hardware state tracking & debounce
+int sdStatus = 0; 
+
 int lastClkVal = HIGH;
 unsigned long buttonPressTime = 0;
 bool buttonActive = false;
 unsigned long lastEncoderTime = 0;
 const unsigned long ENCODER_DEBOUNCE_MS = 50; 
 
-// declaring funcs
 void renderCurrentScreen();
 void drawHeader(const char* title);
 void drawTextProgressBar(int x, int y, int val, int maxVal, int barLength, uint16_t textColor);
-void drawLargeBrackets(int x, int y, int w, int h, uint16_t color);
+void drawLargeBrackets(int x, int y, int w, int h, uint16_t color, int thickness = 2);
 void drawSmugEgg(int cx, int cy);
 void drawRealisticVinyl(int cx, int cy, bool isPlaying);
 void scanSDCatalog();
 void playTrack(int index);
 void handleCommand(char cmd);
+void showLoadingScreen();
+String getFormattedSize(uint32_t bytes);
+
+// Audio callbacks
+void audio_info(const char *info) {
+  uint32_t dur = audio.getAudioFileDuration();
+  if (dur > 0) trackTotalTime = dur;
+}
 
 void setup() {
   Serial.begin(115200);
   delay(500);
 
-  // 1. backlight setup
   pinMode(TFT_BL, OUTPUT);
   analogWrite(TFT_BL, brightness);
 
-  // 2. display setup
   gfx->begin();
   gfx->fillScreen(COLOR_BG);
 
-  // 3. encoder pin setup
   pinMode(ROTARY_CLK, INPUT_PULLUP);
   pinMode(ROTARY_DT, INPUT_PULLUP);
   pinMode(ROTARY_SW, INPUT_PULLUP);
   lastClkVal = digitalRead(ROTARY_CLK);
 
-  // 4. sd card setup (using dedicated vspi pins)
   SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
-  if (!SD.begin(SD_CS, SPI)) {
-    Serial.println("[ERROR] SD Card Mount Failed!");
+  
+  if (!SD.begin(SD_CS, SPI, 10000000)) { 
+    if (SD.cardType() == CARD_NONE) {
+      sdStatus = 1; 
+    } else {
+      sdStatus = 0; 
+    }
   } else {
-    Serial.println("[SUCCESS] SD Card Mounted.");
+    sdStatus = 2; 
     scanSDCatalog();
   }
 
-  // 5. audio output setup
+  // Set up I2S audio pins
   audio.setPinout(I2S_BCK, I2S_LCK, I2S_DIN);
   audio.setVolume(currentVolume);
 
   renderCurrentScreen();
-
-  // serial monitor setup
-  Serial.println("\n==========================================");
-  Serial.println("           EGG MP3 PLAYER ACTIVE          ");
-  Serial.println("==========================================");
-  Serial.println("Serial Controls: 'u'=Up, 'd'=Down, 's'=Select, 'b'=Back");
-  Serial.println("==========================================\n");
 }
 
 void loop() {
+  // Primary audio stream processing
   audio.loop();
 
-  // animation & vinyl rotation update
-  if (currentState == NOW_PLAYING) {
-    bool isPlaying = audio.isRunning();
-    if (isPlaying) {
+  if (audio.isRunning()) {
+    if (!isSeekingMode) {
       trackCurrentTime = audio.getAudioCurrentTime();
-      trackTotalTime = audio.getAudioFileDuration();
-
-      if (millis() - lastAnimTime > 150) {
-        lastAnimTime = millis();
-        vinylFrame = (vinylFrame + 1) % 4;
-        renderCurrentScreen();
-      }
+    }
+    uint32_t dur = audio.getAudioFileDuration();
+    if (dur > 0) {
+      trackTotalTime = dur;
+    }
+    isDacWorking = true;
+  } else {
+    // Diagnostic Check: If playback was started but audio loop halted unexpectedly
+    if (playbackAttempted && (millis() - dacCheckTimer > 2500)) {
+      isDacWorking = false;
     }
   }
 
-  // physical rotary encoder input with debounce
+  // Screen Redraw loop throttled to prevent SPI starvation
+  if (currentState == NOW_PLAYING && audio.isRunning()) {
+    if (millis() - lastAnimTime > VINYL_SPEED_MS) {
+      lastAnimTime = millis();
+      vinylFrame = (vinylFrame + 1) % 4;
+      scrollOffset++;
+      renderCurrentScreen();
+    }
+  }
+
+  if ((currentState == CATALOG_LIST || currentState == SONG_DETAIL) && millis() - lastScrollTime > 350) {
+    lastScrollTime = millis();
+    scrollOffset++;
+    renderCurrentScreen();
+  }
+
+  // Encoder controls logic
   int currentClk = digitalRead(ROTARY_CLK);
-  
   if (currentClk != lastClkVal && currentClk == LOW) {
     if (millis() - lastEncoderTime > ENCODER_DEBOUNCE_MS) {
       lastEncoderTime = millis();
@@ -179,7 +216,7 @@ void loop() {
   }
   lastClkVal = currentClk;
 
-  // encoder switch logic
+  // Encoder push button logic
   int swVal = digitalRead(ROTARY_SW);
   if (swVal == LOW) {
     if (!buttonActive) {
@@ -191,93 +228,176 @@ void loop() {
       buttonActive = false;
       unsigned long duration = millis() - buttonPressTime;
       if (duration >= 500) {
-        handleCommand('b'); // long press -> back
+        handleCommand('b'); 
       } else if (duration > 50) {
-        handleCommand('s'); // click -> select
+        handleCommand('s'); 
       }
     }
   }
 
-  // serial monitor control input
   if (Serial.available()) {
     char cmd = Serial.read();
     handleCommand(cmd);
   }
 }
 
-// global command dispatcher
+String getFormattedSize(uint32_t bytes) {
+  if (bytes < 1024) return String(bytes) + " B";
+  if (bytes < 1048576) return String(bytes / 1024.0, 1) + " KB";
+  return String(bytes / 1048576.0, 1) + " MB";
+}
+
+void showLoadingScreen() {
+  gfx->fillScreen(COLOR_BG);
+  drawHeader("SYSTEM");
+  gfx->setTextSize(1);
+  gfx->setTextColor(COLOR_TEXT);
+  gfx->setCursor(14, 80);
+  gfx->print("LOADING...");
+}
+
 void handleCommand(char cmd) {
-  if (cmd == 'u') { // up / previous / increase
-    if (currentState == MENU_MAIN) {
-      menuIndex = (menuIndex > 0) ? menuIndex - 1 : maxMenuIndex;
-    } 
-    else if (currentState == CATALOG_LIST && fileCount > 0) {
-      fileIndex = (fileIndex > 0) ? fileIndex - 1 : fileCount - 1;
-    } 
-    else if (currentState == NOW_PLAYING) {
-      currentVolume = constrain(currentVolume + 1, 0, 21);
-      audio.setVolume(currentVolume);
-    }
-    else if (currentState == SETTINGS) {
-      if (settingsIndex == 0) {
-        brightness = constrain(brightness + 25, 25, 255);
-        analogWrite(TFT_BL, brightness);
-      } else {
-        settingsIndex = 0; // move selection to brightness
-      }
-    }
-    renderCurrentScreen();
-  } 
-  else if (cmd == 'd') { // down / next / decrease
+  if (cmd == 'u') { 
+    scrollOffset = 0;
     if (currentState == MENU_MAIN) {
       menuIndex = (menuIndex < maxMenuIndex) ? menuIndex + 1 : 0;
     } 
     else if (currentState == CATALOG_LIST && fileCount > 0) {
       fileIndex = (fileIndex < fileCount - 1) ? fileIndex + 1 : 0;
     } 
+    else if (currentState == SONG_DETAIL) {
+      detailSubIndex = (detailSubIndex == 0) ? 1 : 0;
+    }
     else if (currentState == NOW_PLAYING) {
-      currentVolume = constrain(currentVolume - 1, 0, 21);
-      audio.setVolume(currentVolume);
+      if (isSeekingMode) {
+        uint32_t maxT = (trackTotalTime > 0) ? trackTotalTime : 300;
+        seekTargetTime = constrain((int)seekTargetTime + 5, 0, (int)maxT);
+      } else {
+        playerControlIndex = (playerControlIndex < maxPlayerControls - 1) ? playerControlIndex + 1 : 0;
+      }
     }
     else if (currentState == SETTINGS) {
       if (settingsIndex == 0) {
         brightness = constrain(brightness - 25, 25, 255);
         analogWrite(TFT_BL, brightness);
       } else {
-        settingsIndex = 1; // move selection to palette theme
+        settingsIndex = 1;
       }
     }
     renderCurrentScreen();
   } 
-  else if (cmd == 's') { // select
+  else if (cmd == 'd') { 
+    scrollOffset = 0;
     if (currentState == MENU_MAIN) {
-      if (menuIndex == 0) currentState = CATALOG_LIST;
+      menuIndex = (menuIndex > 0) ? menuIndex - 1 : maxMenuIndex;
+    } 
+    else if (currentState == CATALOG_LIST && fileCount > 0) {
+      fileIndex = (fileIndex > 0) ? fileIndex - 1 : fileCount - 1;
+    } 
+    else if (currentState == SONG_DETAIL) {
+      detailSubIndex = (detailSubIndex == 0) ? 1 : 0;
+    }
+    else if (currentState == NOW_PLAYING) {
+      if (isSeekingMode) {
+        uint32_t maxT = (trackTotalTime > 0) ? trackTotalTime : 300;
+        seekTargetTime = constrain((int)seekTargetTime - 5, 0, (int)maxT);
+      } else {
+        playerControlIndex = (playerControlIndex > 0) ? playerControlIndex - 1 : maxPlayerControls - 1;
+      }
+    }
+    else if (currentState == SETTINGS) {
+      if (settingsIndex == 0) {
+        brightness = constrain(brightness + 25, 25, 255);
+        analogWrite(TFT_BL, brightness);
+      } else {
+        settingsIndex = 0;
+      }
+    }
+    renderCurrentScreen();
+  } 
+  else if (cmd == 's') { 
+    if (currentState == MENU_MAIN) {
+      showLoadingScreen();
+      if (menuIndex == 0) {
+        if (SD.begin(SD_CS, SPI, 10000000)) {
+          sdStatus = 2;
+          scanSDCatalog();
+        } else if (SD.cardType() == CARD_NONE) {
+          sdStatus = 1;
+        } else {
+          sdStatus = 0;
+        }
+        currentState = CATALOG_LIST;
+      }
       else if (menuIndex == 1) currentState = NOW_PLAYING;
       else if (menuIndex == 2) currentState = SETTINGS;
     } 
     else if (currentState == CATALOG_LIST && fileCount > 0) {
-      playTrack(fileIndex);
-      currentState = NOW_PLAYING;
+      detailSubIndex = 0;
+      currentState = SONG_DETAIL;
     } 
+    else if (currentState == SONG_DETAIL) {
+      if (detailSubIndex == 0) {
+        showLoadingScreen();
+        playTrack(fileIndex);
+        currentState = NOW_PLAYING;
+      } else {
+        currentState = CATALOG_LIST;
+      }
+    }
+    else if (currentState == NOW_PLAYING) {
+      if (isSeekingMode) {
+        audio.setAudioPlayTime(seekTargetTime);
+        trackCurrentTime = seekTargetTime;
+        isSeekingMode = false;
+      } else {
+        if (playerControlIndex == CTRL_SEEK_BAR) {
+          isSeekingMode = true;
+          seekTargetTime = trackCurrentTime;
+        } 
+        else if (playerControlIndex == CTRL_PREV) {
+          fileIndex = (fileIndex > 0) ? fileIndex - 1 : (isShuffle ? random(0, fileCount) : fileCount - 1);
+          playTrack(fileIndex);
+        } 
+        else if (playerControlIndex == CTRL_PLAY_PAUSE) {
+          audio.pauseResume();
+        } 
+        else if (playerControlIndex == CTRL_NEXT) {
+          fileIndex = (isShuffle) ? random(0, fileCount) : ((fileIndex < fileCount - 1) ? fileIndex + 1 : 0);
+          playTrack(fileIndex);
+        } 
+        else if (playerControlIndex == CTRL_SHUFFLE) {
+          isShuffle = !isShuffle;
+        } 
+        else if (playerControlIndex == CTRL_VOL) {
+          currentVolume = (currentVolume + 3 > 21) ? 0 : currentVolume + 3;
+          audio.setVolume(currentVolume);
+        }
+      }
+    }
     else if (currentState == SETTINGS) {
-      if (settingsIndex == 1) { // cycle palette
+      if (settingsIndex == 1) {
         currentPaletteIdx = (currentPaletteIdx + 1) % 6;
       } else {
-        settingsIndex = 1; // toggle selection down
+        settingsIndex = 1;
       }
     }
     renderCurrentScreen();
   } 
-  else if (cmd == 'b') { // back
-    currentState = MENU_MAIN;
+  else if (cmd == 'b') { 
+    if (isSeekingMode) {
+      isSeekingMode = false; 
+    } else if (currentState == SONG_DETAIL) {
+      currentState = CATALOG_LIST;
+    } else {
+      showLoadingScreen();
+      currentState = MENU_MAIN;
+    }
     renderCurrentScreen();
   }
 }
 
-// ui drawing funcs
-
 void drawHeader(const char* title) {
-  // title bar line ends 2/3 of the way across (113px out of 170px)
   gfx->drawFastHLine(0, 31, 113, COLOR_PRIMARY);
 
   gfx->setTextSize(2);
@@ -285,58 +405,45 @@ void drawHeader(const char* title) {
   gfx->setCursor(6, 8);
   gfx->printf("> %s", title);
 
-  // status indicators
   gfx->fillRect(145, 10, 5, 5, COLOR_PRIMARY);
   gfx->drawRect(154, 10, 5, 5, COLOR_PRIMARY);
 }
 
-// draw thicker & brighter pixel brackets [ ] around items
-void drawLargeBrackets(int x, int y, int w, int h, uint16_t color) {
-  // left bracket '['
-  gfx->fillRect(x, y, 2, h, color);
-  gfx->fillRect(x, y, 5, 2, color);
-  gfx->fillRect(x, y + h - 2, 5, 2, color);
+void drawLargeBrackets(int x, int y, int w, int h, uint16_t color, int thickness) {
+  gfx->fillRect(x, y, thickness, h, color);
+  gfx->fillRect(x, y, 6, thickness, color);
+  gfx->fillRect(x, y + h - thickness, 6, thickness, color);
 
-  // right bracket ']'
-  gfx->fillRect(x + w - 2, y, 2, h, color);
-  gfx->fillRect(x + w - 5, y, 5, 2, color);
-  gfx->fillRect(x + w - 5, y + h - 2, 5, 2, color);
+  gfx->fillRect(x + w - thickness, y, thickness, h, color);
+  gfx->fillRect(x + w - 6, y, 6, thickness, color);
+  gfx->fillRect(x + w - 6, y + h - thickness, 6, thickness, color);
 }
 
-// significantly larger smug egg mascot (fills lower half)
 void drawSmugEgg(int cx, int cy) {
   gfx->drawEllipse(cx, cy, 56, 64, COLOR_TEXT);
   gfx->drawEllipse(cx, cy, 55, 63, COLOR_TEXT);
 
-  // scaled left eye
   gfx->drawLine(cx - 34, cy - 14, cx - 12, cy - 8, COLOR_TEXT);
   gfx->fillCircle(cx - 22, cy - 3, 6, COLOR_TEXT);
 
-  // scaled right eye
   gfx->drawLine(cx + 12, cy - 8, cx + 34, cy - 14, COLOR_TEXT);
   gfx->fillCircle(cx + 22, cy - 3, 6, COLOR_TEXT);
 
-  // scaled smug smirk
   gfx->drawLine(cx - 8, cy + 22, cx + 18, cy + 28, COLOR_TEXT);
   gfx->drawLine(cx + 18, cy + 28, cx + 28, cy + 16, COLOR_TEXT);
 }
 
-// larger vinyl record with clean crisp center label
 void drawRealisticVinyl(int cx, int cy, bool isPlaying) {
-  // base dark record body fill
   gfx->fillCircle(cx, cy, 54, COLOR_BG);
   
-  // outer rim lines
   gfx->drawCircle(cx, cy, 54, COLOR_TEXT);
   gfx->drawCircle(cx, cy, 53, COLOR_PRIMARY);
   
-  // inner groove rings (using textMuted for clean contrast)
   gfx->drawCircle(cx, cy, 46, COLOR_TEXT_MUTED);
   gfx->drawCircle(cx, cy, 38, COLOR_TEXT_MUTED);
   gfx->drawCircle(cx, cy, 30, COLOR_TEXT_MUTED);
   gfx->drawCircle(cx, cy, 22, COLOR_TEXT_MUTED);
 
-  // spinning reflection highlights
   if (isPlaying) {
     switch (vinylFrame) {
       case 0:
@@ -360,13 +467,11 @@ void drawRealisticVinyl(int cx, int cy, bool isPlaying) {
     gfx->drawLine(cx - 42, cy - 20, cx - 16, cy - 8, COLOR_TEXT_MUTED);
   }
 
-  // refined crisp center label & spindle hole
   gfx->fillCircle(cx, cy, 14, COLOR_PRIMARY);
   gfx->drawCircle(cx, cy, 14, COLOR_TEXT);
   gfx->drawCircle(cx, cy, 6, COLOR_TEXT);
   gfx->fillCircle(cx, cy, 3, COLOR_BG);
 
-  // tonearm base & cartridge
   gfx->fillCircle(cx + 62, cy - 48, 6, COLOR_PRIMARY);
 
   if (isPlaying) {
@@ -380,12 +485,12 @@ void drawRealisticVinyl(int cx, int cy, bool isPlaying) {
   }
 }
 
-// progress bar style: [======>-----]
 void drawTextProgressBar(int x, int y, int val, int maxVal, int barLength, uint16_t textColor) {
   int filledLen = 0;
+  
   if (val > 0 && maxVal > 0) {
-    filledLen = (val * barLength) / maxVal;
-    filledLen = constrain(filledLen, 0, barLength);
+    filledLen = (int)(((float)val / (float)maxVal) * (float)barLength);
+    filledLen = constrain(filledLen, 0, barLength - 1);
   }
 
   gfx->setTextSize(1);
@@ -394,9 +499,9 @@ void drawTextProgressBar(int x, int y, int val, int maxVal, int barLength, uint1
   gfx->print("[");
 
   for (int i = 0; i < barLength; i++) {
-    if (i < filledLen - 1) {
+    if (i < filledLen) {
       gfx->print("="); 
-    } else if (i == filledLen - 1) {
+    } else if (i == filledLen) {
       gfx->print(">"); 
     } else {
       gfx->print("-"); 
@@ -433,7 +538,25 @@ void renderCurrentScreen() {
   else if (currentState == CATALOG_LIST) {
     drawHeader("SD LIST");
 
-    if (fileCount == 0) {
+    if (sdStatus == 0) {
+      gfx->setTextColor(COLOR_TEXT_MUTED);
+      gfx->setTextSize(1);
+      gfx->setCursor(14, 60);
+      gfx->println("[!] SD MODULE ERROR");
+      gfx->setCursor(14, 76);
+      gfx->println("    CHECK WIRING");
+      return;
+    } 
+    else if (sdStatus == 1) {
+      gfx->setTextColor(COLOR_TEXT_MUTED);
+      gfx->setTextSize(1);
+      gfx->setCursor(14, 60);
+      gfx->println("[!] NO MICRO SD");
+      gfx->setCursor(14, 76);
+      gfx->println("    CARD INSERTED");
+      return;
+    }
+    else if (fileCount == 0) {
       gfx->setTextColor(COLOR_TEXT_MUTED);
       gfx->setTextSize(1);
       gfx->setCursor(14, 60);
@@ -450,66 +573,188 @@ void renderCurrentScreen() {
       int y = 52 + ((i - start) * 32);
       gfx->setTextSize(1);
       
-      String displayName = mp3Files[i];
-      if (displayName.length() > 16) displayName = displayName.substring(0, 13) + "...";
+      String fullName = mp3Catalog[i].artist + " - " + mp3Catalog[i].title;
+      String displayName = fullName;
 
       if (i == fileIndex) {
         drawLargeBrackets(6, y - 3, 156, 16, COLOR_TEXT);
         gfx->setTextColor(COLOR_TEXT);
-        gfx->setCursor(14, y);
-        gfx->print(displayName);
+        
+        if (fullName.length() > 14) {
+          int maxOffset = fullName.length() - 14;
+          int shift = scrollOffset % (maxOffset + 4);
+          if (shift > maxOffset) shift = maxOffset;
+          displayName = fullName.substring(shift, shift + 14);
+        }
       } else {
         gfx->setTextColor(COLOR_TEXT_MUTED);
-        gfx->setCursor(14, y);
-        gfx->print(displayName);
+        if (displayName.length() > 14) displayName = displayName.substring(0, 11) + "...";
       }
+
+      gfx->setCursor(14, y);
+      gfx->print(displayName);
     }
     
-    // bottom status info
     gfx->drawFastHLine(10, 290, 150, COLOR_PRIMARY);
     gfx->setTextColor(COLOR_TEXT_MUTED);
     gfx->setCursor(14, 298);
     gfx->printf("FILES: %02d/%02d", fileIndex + 1, fileCount);
-  } 
+  }
+  else if (currentState == SONG_DETAIL) {
+    drawHeader("TRACK INFO");
+
+    TrackInfo t = mp3Catalog[fileIndex];
+
+    gfx->setTextSize(1);
+    gfx->setTextColor(COLOR_TEXT_MUTED);
+    gfx->setCursor(14, 46);
+    gfx->println("ARTIST / TITLE:");
+
+    gfx->setTextColor(COLOR_TEXT);
+    gfx->setCursor(14, 58);
+    String fullTrackLabel = t.artist + " - " + t.title;
+    if (fullTrackLabel.length() > 18) {
+      int shift = scrollOffset % (fullTrackLabel.length() - 14);
+      fullTrackLabel = fullTrackLabel.substring(shift, shift + 18);
+    }
+    gfx->println(fullTrackLabel);
+
+    gfx->setTextColor(COLOR_TEXT_MUTED);
+    gfx->setCursor(14, 85);
+    gfx->println("FILE SIZE:");
+    gfx->setTextColor(COLOR_TEXT);
+    gfx->setCursor(14, 97);
+    gfx->println(getFormattedSize(t.sizeBytes));
+
+    gfx->setTextColor(COLOR_TEXT_MUTED);
+    gfx->setCursor(14, 124);
+    gfx->println("FORMAT / TYPE:");
+    gfx->setTextColor(COLOR_TEXT);
+    gfx->setCursor(14, 136);
+    gfx->println("AUDIO/MPEG (.MP3)");
+
+    int playY = 180;
+    int backY = 215;
+
+    if (detailSubIndex == 0) {
+      drawLargeBrackets(14, playY - 3, 140, 18, COLOR_TEXT);
+      gfx->setTextColor(COLOR_TEXT);
+    } else {
+      gfx->setTextColor(COLOR_TEXT_MUTED);
+    }
+    gfx->setCursor(24, playY);
+    gfx->println("> PLAY TRACK");
+
+    if (detailSubIndex == 1) {
+      drawLargeBrackets(14, backY - 3, 140, 18, COLOR_TEXT);
+      gfx->setTextColor(COLOR_TEXT);
+    } else {
+      gfx->setTextColor(COLOR_TEXT_MUTED);
+    }
+    gfx->setCursor(24, backY);
+    gfx->println("> RETURN TO LIST");
+  }
   else if (currentState == NOW_PLAYING) {
     drawHeader("AUDIO RX");
 
     bool isPlaying = audio.isRunning();
 
-    // centered vinyl shifted slightly left to cx = 80
-    drawRealisticVinyl(80, 102, isPlaying);
+    drawRealisticVinyl(85, 96, isPlaying);
     
-    // track name info
-    gfx->setTextSize(1);
-    gfx->setTextColor(COLOR_TEXT_MUTED);
-    gfx->setCursor(14, 178);
-    gfx->println(isPlaying ? "[PLAYING]" : "[STOPPED]");
-    
+    gfx->setTextSize(2);
     gfx->setTextColor(COLOR_TEXT);
-    gfx->setCursor(14, 194);
+    gfx->setCursor(12, 160);
     String title = currentTrackName;
-    if (title.length() > 20) title = title.substring(0, 17) + "...";
+    if (title.length() > 11) {
+      int maxOffset = title.length() - 11;
+      int shift = scrollOffset % (maxOffset + 4);
+      if (shift > maxOffset) shift = maxOffset;
+      title = title.substring(shift, shift + 11);
+    }
     gfx->println(title);
 
-    // volume percentage hud
-    int volPercent = map(currentVolume, 0, 21, 0, 100);
-    gfx->setCursor(14, 218);
-    gfx->setTextColor(COLOR_TEXT);
-    gfx->printf("VOL: %d%%\n", volPercent);
+    uint32_t activeDisplayTime = isSeekingMode ? seekTargetTime : trackCurrentTime;
 
-    // progress bar
-    if (isPlaying) {
-      gfx->setCursor(14, 240);
+    gfx->setTextSize(1);
+    gfx->setCursor(14, 182);
+    gfx->setTextColor(isSeekingMode ? COLOR_TEXT : COLOR_TEXT_MUTED);
+    gfx->printf("%s%02d:%02d / %02d:%02d\n", 
+               isSeekingMode ? "SEEK: " : "",
+               activeDisplayTime / 60, activeDisplayTime % 60, 
+               trackTotalTime / 60, trackTotalTime % 60);
+
+    // Centered progress bar with 19 segments
+    uint16_t barColor = (playerControlIndex == CTRL_SEEK_BAR) ? COLOR_TEXT : COLOR_TEXT_MUTED;
+    if (playerControlIndex == CTRL_SEEK_BAR) {
+      drawLargeBrackets(15, 192, 140, 14, COLOR_TEXT, 1);
+    }
+    
+    drawTextProgressBar(22, 195, activeDisplayTime, trackTotalTime > 0 ? trackTotalTime : 1, 19, barColor);
+
+    // Control buttons row 1
+    int row1Y = 228;
+    gfx->setTextSize(2);
+
+    if (playerControlIndex == CTRL_PREV) {
+      drawLargeBrackets(12, row1Y - 4, 38, 22, COLOR_TEXT, 2);
+      gfx->setTextColor(COLOR_TEXT);
+    } else {
       gfx->setTextColor(COLOR_TEXT_MUTED);
-      gfx->println("TRACK PROGRESS:");
-      
-      drawTextProgressBar(14, 254, trackCurrentTime, trackTotalTime > 0 ? trackTotalTime : 1, 18, COLOR_TEXT);
+    }
+    gfx->setCursor(18, row1Y);
+    gfx->print("|<");
+
+    if (playerControlIndex == CTRL_PLAY_PAUSE) {
+      drawLargeBrackets(62, row1Y - 4, 38, 22, COLOR_TEXT, 2);
+      gfx->setTextColor(COLOR_TEXT);
+    } else {
+      gfx->setTextColor(COLOR_TEXT_MUTED);
+    }
+    gfx->setCursor(68, row1Y);
+    gfx->print(isPlaying ? "||" : " >");
+
+    if (playerControlIndex == CTRL_NEXT) {
+      drawLargeBrackets(120, row1Y - 4, 38, 22, COLOR_TEXT, 2);
+      gfx->setTextColor(COLOR_TEXT);
+    } else {
+      gfx->setTextColor(COLOR_TEXT_MUTED);
+    }
+    gfx->setCursor(126, row1Y);
+    gfx->print(">|");
+
+    // Control buttons row 2
+    int row2Y = 262;
+    gfx->setTextSize(1);
+
+    if (playerControlIndex == CTRL_SHUFFLE) {
+      drawLargeBrackets(12, row2Y - 3, 64, 18, COLOR_TEXT, 2);
+      gfx->setTextColor(COLOR_TEXT);
+    } else {
+      gfx->setTextColor(COLOR_TEXT_MUTED);
+    }
+    gfx->setCursor(18, row2Y);
+    gfx->printf("SHUF:%s", isShuffle ? "ON" : "OFF");
+
+    if (playerControlIndex == CTRL_VOL) {
+      drawLargeBrackets(92, row2Y - 3, 64, 18, COLOR_TEXT, 2);
+      gfx->setTextColor(COLOR_TEXT);
+    } else {
+      gfx->setTextColor(COLOR_TEXT_MUTED);
+    }
+    gfx->setCursor(98, row2Y);
+    gfx->printf("VOL:%d", currentVolume);
+
+    // DAC Hardware and Stream Diagnostic Message at screen bottom
+    if (!isDacWorking) {
+      gfx->drawFastHLine(10, 290, 150, COLOR_PRIMARY);
+      gfx->setTextColor(COLOR_TEXT);
+      gfx->setCursor(12, 298);
+      gfx->print("[!] CHECK DAC / WIRING");
     }
   } 
   else if (currentState == SETTINGS) {
     drawHeader("CONFIG");
 
-    // brightness setting
     gfx->setTextSize(1);
     if (settingsIndex == 0) {
       drawLargeBrackets(8, 48, 152, 16, COLOR_TEXT);
@@ -522,9 +767,8 @@ void renderCurrentScreen() {
       gfx->print("BL LEVEL");
     }
 
-    drawTextProgressBar(16, 71, brightness, 255, 18, settingsIndex == 0 ? COLOR_TEXT : COLOR_TEXT_MUTED);
+    drawTextProgressBar(22, 71, brightness, 255, 19, settingsIndex == 0 ? COLOR_TEXT : COLOR_TEXT_MUTED);
 
-    // palette theme
     if (settingsIndex == 1) {
       drawLargeBrackets(8, 102, 152, 16, COLOR_TEXT);
       gfx->setTextColor(COLOR_TEXT);
@@ -540,7 +784,6 @@ void renderCurrentScreen() {
     gfx->setCursor(16, 123);
     gfx->println(palettes[currentPaletteIdx].name);
 
-    // terminal keybindings guide
     gfx->drawFastHLine(10, 168, 150, COLOR_PRIMARY);
     gfx->setTextColor(COLOR_TEXT);
     gfx->setCursor(14, 178);
@@ -558,7 +801,6 @@ void renderCurrentScreen() {
   }
 }
 
-// scan SD root for MP3
 void scanSDCatalog() {
   File root = SD.open("/");
   fileCount = 0;
@@ -568,7 +810,26 @@ void scanSDCatalog() {
       String name = String(entry.name());
       if (name.endsWith(".mp3") || name.endsWith(".MP3")) {
         if (fileCount < MAX_FILES) {
-          mp3Files[fileCount] = name;
+          mp3Catalog[fileCount].filename = name;
+          mp3Catalog[fileCount].sizeBytes = entry.size();
+          
+          int dashIdx = name.indexOf('-');
+          if (dashIdx != -1) {
+            String artistPart = name.substring(0, dashIdx);
+            String titlePart = name.substring(dashIdx + 1);
+            titlePart.replace(".mp3", "");
+            titlePart.replace(".MP3", "");
+            artistPart.trim();
+            titlePart.trim();
+            mp3Catalog[fileCount].artist = artistPart;
+            mp3Catalog[fileCount].title = titlePart;
+          } else {
+            String titlePart = name;
+            titlePart.replace(".mp3", "");
+            titlePart.replace(".MP3", "");
+            mp3Catalog[fileCount].artist = "N/A";
+            mp3Catalog[fileCount].title = titlePart;
+          }
           fileCount++;
         }
       }
@@ -580,8 +841,14 @@ void scanSDCatalog() {
 
 void playTrack(int index) {
   if (index >= 0 && index < fileCount) {
-    String path = "/" + mp3Files[index];
-    currentTrackName = mp3Files[index];
+    String path = "/" + mp3Catalog[index].filename;
+    currentTrackName = mp3Catalog[index].title;
+    trackTotalTime = 0; 
+    
+    playbackAttempted = true;
+    dacCheckTimer = millis();
+    isDacWorking = true;
+
     audio.connecttoFS(SD, path.c_str());
   }
 }
