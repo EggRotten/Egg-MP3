@@ -2,9 +2,22 @@
 #include <Arduino_GFX_Library.h>
 #include <SPI.h>
 #include <SD.h>
-#include "Audio.h"
+#include <driver/i2s.h>
+#include "BluetoothA2DPSource.h"
 
-// pcb display pins
+// ESP8266Audio Library Headers
+#include "AudioFileSourceSD.h"
+#include "AudioGeneratorMP3.h"
+#include "AudioOutputI2S.h"
+
+// Bluetooth Low-Level ESP-IDF Headers (Fixed Header Name)
+#include <esp_bt_main.h>
+#include <esp_bt_device.h>
+#include <esp_gap_bt_api.h>
+#include <esp_a2dp_api.h>
+#include <esp_log.h>
+
+// PCB Display Pins
 #define TFT_BL   21
 #define TFT_CS   15
 #define TFT_DC    2
@@ -12,23 +25,24 @@
 #define TFT_SCLK 14
 #define TFT_MOSI 13
 
-// sd card pins (vspi bus)
+// SD Card Pins (VSPI Bus)
 #define SD_SCK   18
 #define SD_MISO  19
 #define SD_MOSI  23
 #define SD_CS     5
 
-// audio jack i2s pins (pcm5102a)
+// GY-PCM5102 I2S DAC Pins
 #define I2S_BCK  26
 #define I2S_LCK  25
 #define I2S_DIN  22
+#define I2S_NUM  I2S_NUM_0
 
-// rot encoder pins (kv-40)
+// Rotary Encoder Pins
 #define ROTARY_CLK 32
 #define ROTARY_DT  33
 #define ROTARY_SW  27
 
-// color palette system
+// Color Palette System
 struct Palette {
   const char* name;
   uint16_t bg;
@@ -57,15 +71,60 @@ int currentPaletteIdx = 0;
 #define COLOR_TEXT        palettes[currentPaletteIdx].text
 #define COLOR_TEXT_MUTED  palettes[currentPaletteIdx].textMuted
 
-Arduino_DataBus *bus = new Arduino_ESP32SPI(TFT_DC, TFT_CS, TFT_SCLK, TFT_MOSI, GFX_NOT_DEFINED, HSPI);
-Arduino_GFX *gfx = new Arduino_ST7789(bus, TFT_RST, 0 /* Portrait */, true, 170, 320, 35, 0, 0, 0);
-Audio audio;
+// Global Hardware Pointers
+Arduino_DataBus *bus = nullptr;
+Arduino_GFX *gfx = nullptr;
+BluetoothA2DPSource *a2dp_source = nullptr;
 
-enum ScreenState { MENU_MAIN, CATALOG_LIST, SONG_DETAIL, NOW_PLAYING, SETTINGS };
+// Audio Decoding Pointers (ESP8266Audio)
+AudioFileSourceSD *audioFile = nullptr;
+AudioGeneratorMP3 *mp3Gen = nullptr;
+AudioOutputI2S *audioOut = nullptr;
+
+enum AudioMode { MODE_WIRED_DAC, MODE_BLUETOOTH };
+AudioMode currentAudioMode = MODE_WIRED_DAC;
+
+// Bluetooth Device Management
+struct BtDevice {
+  String name;
+  esp_bd_addr_t address;
+  String addressStr;
+};
+
+#define MAX_SAVED_BT 5
+#define MAX_DISCOVERED_BT 8
+
+BtDevice savedBtList[MAX_SAVED_BT];
+int savedBtCount = 0;
+
+BtDevice discoveredBtList[MAX_DISCOVERED_BT];
+int discoveredBtCount = 0;
+volatile bool isScanningBt = false;
+unsigned long scanStartTimer = 0;
+
+bool isBtConnected = false;
+String activeBtDeviceName = "";
+
+enum ScreenState { 
+  MENU_MAIN, 
+  CATALOG_LIST, 
+  SONG_DETAIL, 
+  NOW_PLAYING, 
+  BLUETOOTH_MENU, 
+  BT_SCAN_RESULTS,
+  BT_SAVED_LIST,
+  BT_FORGET_LIST,
+  SETTINGS 
+};
+
 ScreenState currentState = MENU_MAIN;
 
 int menuIndex = 0;
-int maxMenuIndex = 2;
+int maxMenuIndex = 3; 
+
+int btMenuIndex = 0;
+int btListIndex = 0;
+
 int settingsIndex = 0; 
 int brightness = 180;  
 int currentVolume = 12; 
@@ -76,6 +135,7 @@ int playerControlIndex = 0;
 const int maxPlayerControls = 6;
 bool isSeekingMode = false;
 uint32_t seekTargetTime = 0;
+unsigned long seekCooldownTimer = 0;
 
 uint32_t trackCurrentTime = 0;
 uint32_t trackTotalTime = 0;
@@ -86,7 +146,6 @@ const unsigned long VINYL_SPEED_MS = 1000;
 unsigned long lastScrollTime = 0;
 int scrollOffset = 0;
 
-// DAC Diagnostic tracking flags
 bool isDacWorking = true;
 bool playbackAttempted = false;
 unsigned long dacCheckTimer = 0;
@@ -98,13 +157,15 @@ struct TrackInfo {
   uint32_t sizeBytes;
 };
 
-#define MAX_FILES 50
+#define MAX_FILES 100
 TrackInfo mp3Catalog[MAX_FILES];
 int fileCount = 0;
 int fileIndex = 0;
 int detailSubIndex = 0; 
 String currentTrackName = "N/A";
 
+int currentBatch = 0; 
+int totalMp3sFound = 0;
 int sdStatus = 0; 
 
 int lastClkVal = HIGH;
@@ -113,30 +174,414 @@ bool buttonActive = false;
 unsigned long lastEncoderTime = 0;
 const unsigned long ENCODER_DEBOUNCE_MS = 50; 
 
+// Forward Declarations
 void renderCurrentScreen();
 void drawHeader(const char* title);
 void drawTextProgressBar(int x, int y, int val, int maxVal, int barLength, uint16_t textColor);
 void drawLargeBrackets(int x, int y, int w, int h, uint16_t color, int thickness = 2);
 void drawSmugEgg(int cx, int cy);
+void drawBtLogo(int cx, int cy);
 void drawRealisticVinyl(int cx, int cy, bool isPlaying);
-void scanSDCatalog();
+void scanSDCatalog(int batchOffset = 0);
 void playTrack(int index);
+void stopAudioDecoder();
 void handleCommand(char cmd);
-void showLoadingScreen();
+void showLoadingScreen(const char* msg);
+void resetNowPlayingState();
 String getFormattedSize(uint32_t bytes);
+void loadConfigFromSD();
+void saveConfigToSD();
 
-// Audio callbacks
-void audio_info(const char *info) {
-  uint32_t dur = audio.getAudioFileDuration();
-  if (dur > 0) trackTotalTime = dur;
+void setupI2SDac();
+void stopI2SDac();
+void startBtScan();
+void stopBtScan();
+void connectToBtDevice(BtDevice dev);
+void saveBtDeviceToList(BtDevice dev);
+void forgetBtDeviceFromList(int index);
+String bdaToString(esp_bd_addr_t bda);
+void stringToBda(String str, esp_bd_addr_t bda);
+void freeUnusedMemory();
+
+// =========================================================================
+//                   ESP8266AUDIO & I2S AUDIO ENGINE
+// =========================================================================
+
+void stopAudioDecoder() {
+  if (mp3Gen && mp3Gen->isRunning()) {
+    mp3Gen->stop();
+    Serial.println("[AUDIO] MP3 Decoder stopped.");
+  }
+  if (audioFile) {
+    audioFile->close();
+    delete audioFile;
+    audioFile = nullptr;
+  }
+  if (mp3Gen) {
+    delete mp3Gen;
+    mp3Gen = nullptr;
+  }
 }
+
+void setupI2SDac() {
+  stopAudioDecoder();
+
+  if (audioOut == nullptr) {
+    audioOut = new AudioOutputI2S(0, AudioOutputI2S::EXTERNAL_I2S);
+    audioOut->SetPinout(I2S_BCK, I2S_LCK, I2S_DIN);
+  }
+  audioOut->SetGain((float)currentVolume / 21.0f);
+  Serial.println("[DAC] AudioOutputI2S Initialized for PCM5102 DAC.");
+}
+
+void stopI2SDac() {
+  stopAudioDecoder();
+  if (audioOut) {
+    delete audioOut;
+    audioOut = nullptr;
+  }
+  Serial.println("[DAC] AudioOutputI2S Uninstalled.");
+}
+
+// =========================================================================
+//         BLUETOOTH GAP CALLBACKS & EIR NAME PARSER
+// =========================================================================
+
+int32_t get_sound_data(Frame *data, int32_t len) {
+  if (data == NULL || len <= 0) return 0;
+
+  // Stream decoded MP3 data if generator is running
+  if (mp3Gen && mp3Gen->isRunning()) {
+    for (int i = 0; i < len; i++) {
+      if (!mp3Gen->loop()) {
+        data[i].channel1 = 0;
+        data[i].channel2 = 0;
+      }
+    }
+  } else {
+    for (int i = 0; i < len; i++) {
+      data[i].channel1 = 0;
+      data[i].channel2 = 0;
+    }
+  }
+  return len;
+}
+
+void custom_esp_a2d_cb(esp_a2d_cb_event_t event, esp_a2d_cb_param_t *param) {
+  if (event == ESP_A2D_CONNECTION_STATE_EVT && param != NULL) {
+    Serial.printf("[BT DIAG A2DP] Connection State: %d | Disc Reason: 0x%02X\n", 
+                  param->conn_stat.state, param->conn_stat.disc_rsn);
+  }
+}
+
+void connection_state_changed(esp_a2d_connection_state_t state, void *ptr) {
+  if (state == ESP_A2D_CONNECTION_STATE_CONNECTED) {
+    Serial.println("[BT STATUS] >>> CONNECTED & PAIRED SUCCESSFULLY! <<<");
+    isBtConnected = true;
+  } else if (state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
+    Serial.println("[BT STATUS] >>> DISCONNECTED / HANDSHAKE REJECTED <<<");
+    isBtConnected = false;
+  }
+}
+
+void bt_gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param) {
+  if (param == NULL) return;
+
+  if (event == ESP_BT_GAP_DISC_STATE_CHANGED_EVT) {
+    if (param->disc_st_chg.state == ESP_BT_GAP_DISCOVERY_STOPPED) {
+      Serial.println("[BT GAP] Discovery Engine: STOPPED.");
+      isScanningBt = false;
+    } else if (param->disc_st_chg.state == ESP_BT_GAP_DISCOVERY_STARTED) {
+      Serial.println("[BT GAP] Discovery Engine: STARTED.");
+    }
+  }
+  else if (event == ESP_BT_GAP_DISC_RES_EVT) {
+    if (discoveredBtCount >= MAX_DISCOVERED_BT || param->disc_res.bda == NULL) return;
+
+    esp_bd_addr_t bda;
+    memcpy(bda, param->disc_res.bda, sizeof(esp_bd_addr_t));
+    String addrStr = bdaToString(bda);
+
+    for (int i = 0; i < discoveredBtCount; i++) {
+      if (discoveredBtList[i].addressStr == addrStr) return;
+    }
+
+    String devName = "";
+    int8_t rssi = 0;
+
+    if (param->disc_res.prop != NULL && param->disc_res.num_prop > 0) {
+      for (int i = 0; i < param->disc_res.num_prop; i++) {
+        esp_bt_gap_dev_prop_t *p = &param->disc_res.prop[i];
+        if (p == NULL || p->val == NULL) continue;
+
+        if (p->type == ESP_BT_GAP_DEV_PROP_RSSI) {
+          rssi = *(int8_t *)(p->val);
+        }
+        else if (p->type == ESP_BT_GAP_DEV_PROP_BDNAME) {
+          char nameBuf[33] = {0};
+          memcpy(nameBuf, p->val, min((int)p->len, 32));
+          devName = String(nameBuf);
+          devName.trim();
+        }
+        else if (p->type == ESP_BT_GAP_DEV_PROP_EIR && devName.length() == 0) {
+          uint8_t *eir = (uint8_t *)p->val;
+          uint8_t eir_len = p->len;
+          uint8_t *p_eir = eir;
+
+          while (p_eir < eir + eir_len) {
+            uint8_t length = *p_eir++;
+            if (length == 0) break;
+            uint8_t type = *p_eir;
+
+            if (type == 0x09 || type == 0x08) { // Complete or Shortened Local Name
+              char eirName[33] = {0};
+              memcpy(eirName, p_eir + 1, min((int)length - 1, 32));
+              devName = String(eirName);
+              devName.trim();
+              break;
+            }
+            p_eir += length;
+          }
+        }
+      }
+    }
+
+    if (devName.length() == 0) {
+      devName = "BT Device [" + addrStr.substring(12) + "]";
+    }
+
+    Serial.printf("[BT DISCOVERY] Found: %s | MAC: %s | RSSI: %d dBm\n", devName.c_str(), addrStr.c_str(), rssi);
+
+    discoveredBtList[discoveredBtCount].name = devName;
+    memcpy(discoveredBtList[discoveredBtCount].address, bda, sizeof(esp_bd_addr_t));
+    discoveredBtList[discoveredBtCount].addressStr = addrStr;
+    discoveredBtCount++;
+  }
+  else if (event == ESP_BT_GAP_CFM_REQ_EVT) {
+    Serial.println("[BT GAP] SSP Confirmation Request Received. Auto-confirming...");
+    esp_bt_gap_ssp_confirm_reply(param->cfm_req.bda, true);
+  }
+  else if (event == ESP_BT_GAP_PIN_REQ_EVT) {
+    Serial.println("[BT GAP] PIN Code Request Received. Replying 0000...");
+    esp_bt_pin_code_t pin_code = {'0', '0', '0', '0'};
+    esp_bt_gap_pin_reply(param->pin_req.bda, true, 4, pin_code);
+  }
+}
+
+String bdaToString(esp_bd_addr_t bda) {
+  char buf[18];
+  sprintf(buf, "%02X:%02X:%02X:%02X:%02X:%02X", bda[0], bda[1], bda[2], bda[3], bda[4], bda[5]);
+  return String(buf);
+}
+
+void stringToBda(String str, esp_bd_addr_t bda) {
+  unsigned int b[6];
+  sscanf(str.c_str(), "%02X:%02X:%02X:%02X:%02X:%02X", &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]);
+  for (int i = 0; i < 6; i++) bda[i] = (uint8_t)b[i];
+}
+
+// =========================================================================
+//                     SD CONFIGURATION ENGINE
+// =========================================================================
+
+void loadConfigFromSD() {
+  if (!SD.exists("/config.txt")) return;
+  
+  File configFile = SD.open("/config.txt", FILE_READ);
+  if (configFile) {
+    savedBtCount = 0;
+    while (configFile.available()) {
+      String line = configFile.readStringUntil('\n');
+      line.trim();
+      if (line.startsWith("THEME=")) {
+        currentPaletteIdx = line.substring(6).toInt() % 6;
+      } else if (line.startsWith("SAVED_BT=")) {
+        if (savedBtCount < MAX_SAVED_BT) {
+          String val = line.substring(9);
+          int pipeIdx = val.indexOf('|');
+          if (pipeIdx != -1) {
+            savedBtList[savedBtCount].name = val.substring(0, pipeIdx);
+            savedBtList[savedBtCount].addressStr = val.substring(pipeIdx + 1);
+            stringToBda(savedBtList[savedBtCount].addressStr, savedBtList[savedBtCount].address);
+            savedBtCount++;
+          }
+        }
+      }
+    }
+    configFile.close();
+    Serial.printf("[CONFIG] Loaded settings from SD card. Theme ID: %d, Saved BT Devs: %d\n", currentPaletteIdx, savedBtCount);
+  }
+}
+
+void saveConfigToSD() {
+  SD.remove("/config.txt");
+  File configFile = SD.open("/config.txt", FILE_WRITE);
+  if (configFile) {
+    configFile.printf("THEME=%d\n", currentPaletteIdx);
+    for (int i = 0; i < savedBtCount; i++) {
+      configFile.printf("SAVED_BT=%s|%s\n", savedBtList[i].name.c_str(), savedBtList[i].addressStr.c_str());
+    }
+    configFile.close();
+    Serial.println("[CONFIG] Saved current settings to SD card.");
+  }
+}
+
+void freeUnusedMemory() {
+  fileCount = 0; 
+}
+
+// =========================================================================
+//                 SAFE BLUETOOTH CONTROLLER LOGIC
+// =========================================================================
+
+void startBtScan() {
+  Serial.println("\n[BT ENGINE] Initiating Bluetooth Scan Procedure...");
+  
+  if (isScanningBt) {
+    esp_bt_gap_cancel_discovery();
+    delay(100);
+  }
+
+  isScanningBt = true;
+  discoveredBtCount = 0;
+  scanStartTimer = millis(); 
+
+  freeUnusedMemory();
+  delay(50);
+
+  uint32_t freeHeap = ESP.getFreeHeap();
+  Serial.printf("[BT ENGINE] Free Heap Available: %u bytes\n", freeHeap);
+  
+  if (freeHeap < 35000) {
+    Serial.println("[BT ENGINE ERROR] Insufficient RAM!");
+    isScanningBt = false;
+    return;
+  }
+
+  if (!btStarted()) {
+    if (!btStart()) {
+      Serial.println("[BT ENGINE ERROR] Failed to start Bluetooth Controller!");
+      isScanningBt = false;
+      return;
+    }
+  }
+
+  if (esp_bluedroid_get_status() == ESP_BLUEDROID_STATUS_UNINITIALIZED) {
+    esp_bluedroid_init();
+  }
+
+  if (esp_bluedroid_get_status() != ESP_BLUEDROID_STATUS_ENABLED) {
+    esp_bluedroid_enable();
+  }
+
+  esp_bt_gap_register_callback(bt_gap_cb);
+  esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE);
+
+  esp_bt_sp_param_t param_type = ESP_BT_SP_IOCAP_MODE;
+  esp_bt_io_cap_t io_cap = ESP_BT_IO_CAP_NONE;
+  esp_bt_gap_set_security_param(param_type, &io_cap, sizeof(uint8_t));
+
+  esp_err_t ret = esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, 5, 0);
+  if (ret != ESP_OK) {
+    Serial.printf("[BT ENGINE ERROR] Discovery start failed! Code: 0x%X\n", ret);
+    isScanningBt = false;
+  }
+}
+
+void stopBtScan() {
+  if (isScanningBt) {
+    Serial.println("[BT ENGINE] Stopping Discovery...");
+    esp_bt_gap_cancel_discovery();
+    delay(100); 
+    isScanningBt = false;
+  }
+}
+
+void connectToBtDevice(BtDevice dev) {
+  Serial.println("\n===================================================");
+  Serial.printf("[BT CONNECT] Target Device: %s [%s]\n", dev.name.c_str(), dev.addressStr.c_str());
+  Serial.println("===================================================");
+
+  stopBtScan();
+  showLoadingScreen("CONNECTING...");
+
+  resetNowPlayingState();
+
+  currentAudioMode = MODE_BLUETOOTH;
+  activeBtDeviceName = dev.name;
+  isBtConnected = false;
+  saveBtDeviceToList(dev);
+
+  if (a2dp_source == nullptr) {
+    a2dp_source = new BluetoothA2DPSource();
+  }
+
+  a2dp_source->set_data_callback_in_frames(get_sound_data);
+  a2dp_source->set_on_connection_state_changed(connection_state_changed);
+  a2dp_source->set_auto_reconnect(true);
+  
+  esp_a2d_register_callback(custom_esp_a2d_cb);
+
+  esp_bt_sp_param_t param_type = ESP_BT_SP_IOCAP_MODE;
+  esp_bt_io_cap_t io_cap = ESP_BT_IO_CAP_NONE;
+  esp_bt_gap_set_security_param(param_type, &io_cap, sizeof(uint8_t));
+
+  esp_bt_gap_remove_bond_device(dev.address);
+  delay(150);
+
+  a2dp_source->start((char*)dev.name.c_str());
+}
+
+void saveBtDeviceToList(BtDevice dev) {
+  for (int i = 0; i < savedBtCount; i++) {
+    if (savedBtList[i].addressStr == dev.addressStr) {
+      savedBtList[i].name = dev.name; 
+      saveConfigToSD();
+      return;
+    }
+  }
+
+  if (savedBtCount < MAX_SAVED_BT) {
+    savedBtList[savedBtCount] = dev;
+    savedBtCount++;
+  } else {
+    for (int i = 0; i < MAX_SAVED_BT - 1; i++) {
+      savedBtList[i] = savedBtList[i + 1];
+    }
+    savedBtList[MAX_SAVED_BT - 1] = dev;
+  }
+  saveConfigToSD();
+}
+
+void forgetBtDeviceFromList(int index) {
+  if (index >= 0 && index < savedBtCount) {
+    Serial.printf("[BT] Removing saved device: %s\n", savedBtList[index].name.c_str());
+    for (int i = index; i < savedBtCount - 1; i++) {
+      savedBtList[i] = savedBtList[i + 1];
+    }
+    savedBtCount--;
+    saveConfigToSD();
+  }
+}
+
+// =========================================================================
+//                           MAIN SETUP & LOOP
+// =========================================================================
 
 void setup() {
   Serial.begin(115200);
   delay(500);
 
+  Serial.println("\n=================================");
+  Serial.println("     EGG MP3 SYSTEM STARTUP      ");
+  Serial.println("=================================");
+  Serial.printf("[SYSTEM] Initial Free Heap: %u bytes\n", ESP.getFreeHeap());
+
   pinMode(TFT_BL, OUTPUT);
-  analogWrite(TFT_BL, brightness);
+  digitalWrite(TFT_BL, HIGH); 
+
+  bus = new Arduino_ESP32SPI(TFT_DC, TFT_CS, TFT_SCLK, TFT_MOSI, GFX_NOT_DEFINED, HSPI);
+  gfx = new Arduino_ST7789(bus, TFT_RST, 0, true, 170, 320, 35, 0, 0, 0);
 
   gfx->begin();
   gfx->fillScreen(COLOR_BG);
@@ -147,47 +592,40 @@ void setup() {
   lastClkVal = digitalRead(ROTARY_CLK);
 
   SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
-  
-  if (!SD.begin(SD_CS, SPI, 10000000)) { 
-    if (SD.cardType() == CARD_NONE) {
-      sdStatus = 1; 
-    } else {
-      sdStatus = 0; 
-    }
+  if (!SD.begin(SD_CS, SPI, 4000000)) { 
+    if (SD.cardType() == CARD_NONE) sdStatus = 1; 
+    else sdStatus = 0; 
+    Serial.println("[SD] Failed to mount SD Card.");
   } else {
-    sdStatus = 2; 
-    scanSDCatalog();
+    sdStatus = 2;
+    Serial.println("[SD] MicroSD Card mounted successfully.");
+    loadConfigFromSD(); 
+    scanSDCatalog(0);
   }
 
-  // Set up I2S audio pins
-  audio.setPinout(I2S_BCK, I2S_LCK, I2S_DIN);
-  audio.setVolume(currentVolume);
+  currentAudioMode = MODE_WIRED_DAC;
+  setupI2SDac();
 
   renderCurrentScreen();
 }
 
 void loop() {
-  // Primary audio stream processing
-  audio.loop();
-
-  if (audio.isRunning()) {
-    if (!isSeekingMode) {
-      trackCurrentTime = audio.getAudioCurrentTime();
-    }
-    uint32_t dur = audio.getAudioFileDuration();
-    if (dur > 0) {
-      trackTotalTime = dur;
-    }
-    isDacWorking = true;
-  } else {
-    // Diagnostic Check: If playback was started but audio loop halted unexpectedly
-    if (playbackAttempted && (millis() - dacCheckTimer > 2500)) {
-      isDacWorking = false;
+  // Process continuous audio decoding for wired DAC mode
+  if (currentAudioMode == MODE_WIRED_DAC && mp3Gen && mp3Gen->isRunning()) {
+    if (!mp3Gen->loop()) {
+      stopAudioDecoder();
+      playbackAttempted = false;
+      Serial.println("[AUDIO] Track playback ended.");
+      renderCurrentScreen();
     }
   }
 
-  // Screen Redraw loop throttled to prevent SPI starvation
-  if (currentState == NOW_PLAYING && audio.isRunning()) {
+  if (isScanningBt && (millis() - scanStartTimer > 7000)) {
+    stopBtScan();
+    renderCurrentScreen();
+  }
+
+  if (currentState == NOW_PLAYING) {
     if (millis() - lastAnimTime > VINYL_SPEED_MS) {
       lastAnimTime = millis();
       vinylFrame = (vinylFrame + 1) % 4;
@@ -196,27 +634,22 @@ void loop() {
     }
   }
 
-  if ((currentState == CATALOG_LIST || currentState == SONG_DETAIL) && millis() - lastScrollTime > 350) {
+  if ((currentState == CATALOG_LIST || currentState == SONG_DETAIL || currentState == BT_SCAN_RESULTS || currentState == BT_SAVED_LIST) && millis() - lastScrollTime > 350) {
     lastScrollTime = millis();
     scrollOffset++;
     renderCurrentScreen();
   }
 
-  // Encoder controls logic
   int currentClk = digitalRead(ROTARY_CLK);
   if (currentClk != lastClkVal && currentClk == LOW) {
     if (millis() - lastEncoderTime > ENCODER_DEBOUNCE_MS) {
       lastEncoderTime = millis();
-      if (digitalRead(ROTARY_DT) != currentClk) {
-        handleCommand('d'); 
-      } else {
-        handleCommand('u'); 
-      }
+      if (digitalRead(ROTARY_DT) != currentClk) handleCommand('d'); 
+      else handleCommand('u'); 
     }
   }
   lastClkVal = currentClk;
 
-  // Encoder push button logic
   int swVal = digitalRead(ROTARY_SW);
   if (swVal == LOW) {
     if (!buttonActive) {
@@ -227,11 +660,8 @@ void loop() {
     if (buttonActive) {
       buttonActive = false;
       unsigned long duration = millis() - buttonPressTime;
-      if (duration >= 500) {
-        handleCommand('b'); 
-      } else if (duration > 50) {
-        handleCommand('s'); 
-      }
+      if (duration >= 500) handleCommand('b'); 
+      else if (duration > 50) handleCommand('s'); 
     }
   }
 
@@ -241,19 +671,29 @@ void loop() {
   }
 }
 
+void resetNowPlayingState() {
+  stopAudioDecoder();
+  currentTrackName = "N/A";
+  trackCurrentTime = 0;
+  trackTotalTime = 0;
+  playbackAttempted = false;
+  isDacWorking = true;
+  isSeekingMode = false;
+}
+
 String getFormattedSize(uint32_t bytes) {
   if (bytes < 1024) return String(bytes) + " B";
   if (bytes < 1048576) return String(bytes / 1024.0, 1) + " KB";
   return String(bytes / 1048576.0, 1) + " MB";
 }
 
-void showLoadingScreen() {
+void showLoadingScreen(const char* msg) {
   gfx->fillScreen(COLOR_BG);
   drawHeader("SYSTEM");
   gfx->setTextSize(1);
   gfx->setTextColor(COLOR_TEXT);
   gfx->setCursor(14, 80);
-  gfx->print("LOADING...");
+  gfx->print(msg);
 }
 
 void handleCommand(char cmd) {
@@ -263,7 +703,16 @@ void handleCommand(char cmd) {
       menuIndex = (menuIndex < maxMenuIndex) ? menuIndex + 1 : 0;
     } 
     else if (currentState == CATALOG_LIST && fileCount > 0) {
-      fileIndex = (fileIndex < fileCount - 1) ? fileIndex + 1 : 0;
+      if (fileIndex < fileCount - 1) {
+        fileIndex++;
+      } else if (fileCount == MAX_FILES) {
+        currentBatch++;
+        showLoadingScreen("LOADING...");
+        scanSDCatalog(currentBatch * MAX_FILES);
+        fileIndex = 0;
+      } else {
+        fileIndex = 0; 
+      }
     } 
     else if (currentState == SONG_DETAIL) {
       detailSubIndex = (detailSubIndex == 0) ? 1 : 0;
@@ -271,17 +720,36 @@ void handleCommand(char cmd) {
     else if (currentState == NOW_PLAYING) {
       if (isSeekingMode) {
         uint32_t maxT = (trackTotalTime > 0) ? trackTotalTime : 300;
-        seekTargetTime = constrain((int)seekTargetTime + 5, 0, (int)maxT);
+        seekTargetTime = (seekTargetTime + 5 <= maxT) ? seekTargetTime + 5 : maxT;
       } else {
         playerControlIndex = (playerControlIndex < maxPlayerControls - 1) ? playerControlIndex + 1 : 0;
+      }
+    }
+    else if (currentState == BLUETOOTH_MENU) {
+      btMenuIndex = (btMenuIndex < 3) ? btMenuIndex + 1 : 0;
+    }
+    else if (currentState == BT_SCAN_RESULTS) {
+      if (discoveredBtCount > 0) {
+        btListIndex = (btListIndex < discoveredBtCount - 1) ? btListIndex + 1 : 0;
+      }
+    }
+    else if (currentState == BT_SAVED_LIST) {
+      if (savedBtCount > 0) {
+        btListIndex = (btListIndex < savedBtCount - 1) ? btListIndex + 1 : 0;
+      }
+    }
+    else if (currentState == BT_FORGET_LIST) {
+      if (savedBtCount > 0) {
+        btListIndex = (btListIndex < savedBtCount - 1) ? btListIndex + 1 : 0;
       }
     }
     else if (currentState == SETTINGS) {
       if (settingsIndex == 0) {
         brightness = constrain(brightness - 25, 25, 255);
-        analogWrite(TFT_BL, brightness);
+        digitalWrite(TFT_BL, brightness > 50 ? HIGH : LOW);
       } else {
-        settingsIndex = 1;
+        currentPaletteIdx = (currentPaletteIdx + 1) % 6;
+        saveConfigToSD(); 
       }
     }
     renderCurrentScreen();
@@ -292,45 +760,75 @@ void handleCommand(char cmd) {
       menuIndex = (menuIndex > 0) ? menuIndex - 1 : maxMenuIndex;
     } 
     else if (currentState == CATALOG_LIST && fileCount > 0) {
-      fileIndex = (fileIndex > 0) ? fileIndex - 1 : fileCount - 1;
+      if (fileIndex > 0) {
+        fileIndex--;
+      } else if (currentBatch > 0) {
+        currentBatch--;
+        showLoadingScreen("LOADING...");
+        scanSDCatalog(currentBatch * MAX_FILES);
+        fileIndex = fileCount - 1;
+      } else {
+        fileIndex = fileCount - 1; 
+      }
     } 
     else if (currentState == SONG_DETAIL) {
       detailSubIndex = (detailSubIndex == 0) ? 1 : 0;
     }
     else if (currentState == NOW_PLAYING) {
       if (isSeekingMode) {
-        uint32_t maxT = (trackTotalTime > 0) ? trackTotalTime : 300;
-        seekTargetTime = constrain((int)seekTargetTime - 5, 0, (int)maxT);
+        seekTargetTime = (seekTargetTime >= 5) ? seekTargetTime - 5 : 0;
       } else {
         playerControlIndex = (playerControlIndex > 0) ? playerControlIndex - 1 : maxPlayerControls - 1;
+      }
+    }
+    else if (currentState == BLUETOOTH_MENU) {
+      btMenuIndex = (btMenuIndex > 0) ? btMenuIndex - 1 : 3;
+    }
+    else if (currentState == BT_SCAN_RESULTS) {
+      if (discoveredBtCount > 0) {
+        btListIndex = (btListIndex > 0) ? btListIndex - 1 : discoveredBtCount - 1;
+      }
+    }
+    else if (currentState == BT_SAVED_LIST) {
+      if (savedBtCount > 0) {
+        btListIndex = (btListIndex > 0) ? btListIndex - 1 : savedBtCount - 1;
+      }
+    }
+    else if (currentState == BT_FORGET_LIST) {
+      if (savedBtCount > 0) {
+        btListIndex = (btListIndex > 0) ? btListIndex - 1 : savedBtCount - 1;
       }
     }
     else if (currentState == SETTINGS) {
       if (settingsIndex == 0) {
         brightness = constrain(brightness + 25, 25, 255);
-        analogWrite(TFT_BL, brightness);
+        digitalWrite(TFT_BL, brightness > 50 ? HIGH : LOW);
       } else {
-        settingsIndex = 0;
+        settingsIndex = (settingsIndex == 0) ? 1 : 0;
       }
     }
     renderCurrentScreen();
   } 
   else if (cmd == 's') { 
     if (currentState == MENU_MAIN) {
-      showLoadingScreen();
+      showLoadingScreen("LOADING...");
       if (menuIndex == 0) {
-        if (SD.begin(SD_CS, SPI, 10000000)) {
+        if (SD.begin(SD_CS, SPI, 4000000)) {
           sdStatus = 2;
-          scanSDCatalog();
+          currentBatch = 0;
+          scanSDCatalog(0);
         } else if (SD.cardType() == CARD_NONE) {
           sdStatus = 1;
+          resetNowPlayingState();
         } else {
           sdStatus = 0;
+          resetNowPlayingState();
         }
         currentState = CATALOG_LIST;
       }
       else if (menuIndex == 1) currentState = NOW_PLAYING;
-      else if (menuIndex == 2) currentState = SETTINGS;
+      else if (menuIndex == 2) currentState = BLUETOOTH_MENU;
+      else if (menuIndex == 3) currentState = SETTINGS;
     } 
     else if (currentState == CATALOG_LIST && fileCount > 0) {
       detailSubIndex = 0;
@@ -338,7 +836,7 @@ void handleCommand(char cmd) {
     } 
     else if (currentState == SONG_DETAIL) {
       if (detailSubIndex == 0) {
-        showLoadingScreen();
+        showLoadingScreen("BUFFERING...");
         playTrack(fileIndex);
         currentState = NOW_PLAYING;
       } else {
@@ -347,8 +845,8 @@ void handleCommand(char cmd) {
     }
     else if (currentState == NOW_PLAYING) {
       if (isSeekingMode) {
-        audio.setAudioPlayTime(seekTargetTime);
         trackCurrentTime = seekTargetTime;
+        seekCooldownTimer = millis() + 2000; 
         isSeekingMode = false;
       } else {
         if (playerControlIndex == CTRL_SEEK_BAR) {
@@ -356,50 +854,85 @@ void handleCommand(char cmd) {
           seekTargetTime = trackCurrentTime;
         } 
         else if (playerControlIndex == CTRL_PREV) {
-          fileIndex = (fileIndex > 0) ? fileIndex - 1 : (isShuffle ? random(0, fileCount) : fileCount - 1);
-          playTrack(fileIndex);
-        } 
-        else if (playerControlIndex == CTRL_PLAY_PAUSE) {
-          audio.pauseResume();
+          fileIndex = (fileIndex > 0) ? fileIndex - 1 : (isShuffle ? random(0, max(1, fileCount)) : max(0, fileCount - 1));
+          if (fileCount > 0) playTrack(fileIndex);
         } 
         else if (playerControlIndex == CTRL_NEXT) {
-          fileIndex = (isShuffle) ? random(0, fileCount) : ((fileIndex < fileCount - 1) ? fileIndex + 1 : 0);
-          playTrack(fileIndex);
+          fileIndex = (isShuffle) ? random(0, max(1, fileCount)) : ((fileIndex < fileCount - 1) ? fileIndex + 1 : 0);
+          if (fileCount > 0) playTrack(fileIndex);
         } 
         else if (playerControlIndex == CTRL_SHUFFLE) {
           isShuffle = !isShuffle;
         } 
         else if (playerControlIndex == CTRL_VOL) {
           currentVolume = (currentVolume + 3 > 21) ? 0 : currentVolume + 3;
-          audio.setVolume(currentVolume);
+          if (audioOut) audioOut->SetGain((float)currentVolume / 21.0f);
         }
       }
     }
-    else if (currentState == SETTINGS) {
-      if (settingsIndex == 1) {
-        currentPaletteIdx = (currentPaletteIdx + 1) % 6;
-      } else {
-        settingsIndex = 1;
+    else if (currentState == BLUETOOTH_MENU) {
+      if (btMenuIndex == 0) {
+        btListIndex = 0;
+        startBtScan();
+        currentState = BT_SCAN_RESULTS;
+      } else if (btMenuIndex == 1) {
+        btListIndex = 0;
+        currentState = BT_SAVED_LIST;
+      } else if (btMenuIndex == 2) {
+        btListIndex = 0;
+        currentState = BT_FORGET_LIST;
+      } else if (btMenuIndex == 3) {
+        stopBtScan();
+        currentAudioMode = MODE_WIRED_DAC;
+        isBtConnected = false;
+        setupI2SDac();
+        saveConfigToSD();
       }
+    }
+    else if (currentState == BT_SCAN_RESULTS) {
+      if (discoveredBtCount > 0 && btListIndex < discoveredBtCount) {
+        connectToBtDevice(discoveredBtList[btListIndex]);
+        currentState = BLUETOOTH_MENU;
+      }
+    }
+    else if (currentState == BT_SAVED_LIST) {
+      if (savedBtCount > 0 && btListIndex < savedBtCount) {
+        connectToBtDevice(savedBtList[btListIndex]);
+        currentState = BLUETOOTH_MENU;
+      }
+    }
+    else if (currentState == BT_FORGET_LIST) {
+      if (savedBtCount > 0 && btListIndex < savedBtCount) {
+        forgetBtDeviceFromList(btListIndex);
+        if (savedBtCount == 0) currentState = BLUETOOTH_MENU;
+        else btListIndex = max(0, btListIndex - 1);
+      }
+    }
+    else if (currentState == SETTINGS) {
+      settingsIndex = (settingsIndex == 0) ? 1 : 0;
     }
     renderCurrentScreen();
   } 
   else if (cmd == 'b') { 
-    if (isSeekingMode) {
-      isSeekingMode = false; 
+    stopBtScan();
+    if (currentState == BT_SCAN_RESULTS || currentState == BT_SAVED_LIST || currentState == BT_FORGET_LIST) {
+      currentState = BLUETOOTH_MENU;
     } else if (currentState == SONG_DETAIL) {
       currentState = CATALOG_LIST;
     } else {
-      showLoadingScreen();
+      showLoadingScreen("LOADING...");
       currentState = MENU_MAIN;
     }
     renderCurrentScreen();
   }
 }
 
+// =========================================================================
+//                             UI RENDERING ENGINE
+// =========================================================================
+
 void drawHeader(const char* title) {
   gfx->drawFastHLine(0, 31, 113, COLOR_PRIMARY);
-
   gfx->setTextSize(2);
   gfx->setTextColor(COLOR_TEXT);
   gfx->setCursor(6, 8);
@@ -433,9 +966,25 @@ void drawSmugEgg(int cx, int cy) {
   gfx->drawLine(cx + 18, cy + 28, cx + 28, cy + 16, COLOR_TEXT);
 }
 
+void drawBtLogo(int cx, int cy) {
+  uint16_t color = COLOR_TEXT;
+  gfx->drawCircle(cx, cy, 36, COLOR_PRIMARY);
+  gfx->drawCircle(cx, cy, 35, COLOR_PRIMARY);
+
+  gfx->drawLine(cx, cy - 20, cx, cy + 20, color);
+  gfx->drawLine(cx - 1, cy - 20, cx - 1, cy + 20, color);
+
+  gfx->drawLine(cx - 10, cy - 10, cx + 10, cy + 10, color);
+  gfx->drawLine(cx + 10, cy - 10, cx, cy - 20, color);
+  gfx->drawLine(cx + 10, cy - 10, cx, cy, color);
+
+  gfx->drawLine(cx - 10, cy + 10, cx + 10, cy - 10, color);
+  gfx->drawLine(cx + 10, cy + 10, cx, cy + 20, color);
+  gfx->drawLine(cx + 10, cy + 10, cx, cy, color);
+}
+
 void drawRealisticVinyl(int cx, int cy, bool isPlaying) {
   gfx->fillCircle(cx, cy, 54, COLOR_BG);
-  
   gfx->drawCircle(cx, cy, 54, COLOR_TEXT);
   gfx->drawCircle(cx, cy, 53, COLOR_PRIMARY);
   
@@ -487,7 +1036,6 @@ void drawRealisticVinyl(int cx, int cy, bool isPlaying) {
 
 void drawTextProgressBar(int x, int y, int val, int maxVal, int barLength, uint16_t textColor) {
   int filledLen = 0;
-  
   if (val > 0 && maxVal > 0) {
     filledLen = (int)(((float)val / (float)maxVal) * (float)barLength);
     filledLen = constrain(filledLen, 0, barLength - 1);
@@ -516,23 +1064,20 @@ void renderCurrentScreen() {
   if (currentState == MENU_MAIN) {
     drawHeader("EGG MP3");
     
-    const char* options[] = {"SD CATALOG", "NOW PLAYING", "SYSTEM SETTINGS"};
-    for (int i = 0; i < 3; i++) {
-      int y = 44 + (i * 26);
+    const char* options[] = {"SD CATALOG", "NOW PLAYING", "BLUETOOTH", "SETTINGS"};
+    for (int i = 0; i < 4; i++) {
+      int y = 44 + (i * 24);
       gfx->setTextSize(1);
       
       if (i == menuIndex) {
         drawLargeBrackets(8, y - 3, 152, 16, COLOR_TEXT);
         gfx->setTextColor(COLOR_TEXT);
-        gfx->setCursor(16, y);
-        gfx->printf("%d. %s", i + 1, options[i]);
       } else {
         gfx->setTextColor(COLOR_TEXT_MUTED);
-        gfx->setCursor(16, y);
-        gfx->printf("%d. %s", i + 1, options[i]);
       }
+      gfx->setCursor(16, y);
+      gfx->printf("%d. %s", i + 1, options[i]);
     }
-
     drawSmugEgg(85, 238);
   } 
   else if (currentState == CATALOG_LIST) {
@@ -598,7 +1143,7 @@ void renderCurrentScreen() {
     gfx->drawFastHLine(10, 290, 150, COLOR_PRIMARY);
     gfx->setTextColor(COLOR_TEXT_MUTED);
     gfx->setCursor(14, 298);
-    gfx->printf("FILES: %02d/%02d", fileIndex + 1, fileCount);
+    gfx->printf("PG:%d FILE:%02d/%02d", currentBatch + 1, fileIndex + 1, fileCount);
   }
   else if (currentState == SONG_DETAIL) {
     drawHeader("TRACK INFO");
@@ -655,10 +1200,13 @@ void renderCurrentScreen() {
     gfx->println("> RETURN TO LIST");
   }
   else if (currentState == NOW_PLAYING) {
-    drawHeader("AUDIO RX");
+    if (isSeekingMode) {
+      drawHeader("SEEKING");
+    } else {
+      drawHeader(currentAudioMode == MODE_BLUETOOTH ? "BT AUDIO" : "DAC AUDIO");
+    }
 
-    bool isPlaying = audio.isRunning();
-
+    bool isPlaying = (currentAudioMode == MODE_BLUETOOTH) ? isBtConnected : playbackAttempted;
     drawRealisticVinyl(85, 96, isPlaying);
     
     gfx->setTextSize(2);
@@ -679,23 +1227,21 @@ void renderCurrentScreen() {
     gfx->setCursor(14, 182);
     gfx->setTextColor(isSeekingMode ? COLOR_TEXT : COLOR_TEXT_MUTED);
     gfx->printf("%s%02d:%02d / %02d:%02d\n", 
-               isSeekingMode ? "SEEK: " : "",
-               activeDisplayTime / 60, activeDisplayTime % 60, 
-               trackTotalTime / 60, trackTotalTime % 60);
+               isSeekingMode ? "SET: " : "",
+               (activeDisplayTime / 60) % 100, activeDisplayTime % 60, 
+               (trackTotalTime / 60) % 100, trackTotalTime % 60);
 
-    // Centered progress bar with 19 segments
-    uint16_t barColor = (playerControlIndex == CTRL_SEEK_BAR) ? COLOR_TEXT : COLOR_TEXT_MUTED;
-    if (playerControlIndex == CTRL_SEEK_BAR) {
+    uint16_t barColor = (playerControlIndex == CTRL_SEEK_BAR || isSeekingMode) ? COLOR_TEXT : COLOR_TEXT_MUTED;
+    if (playerControlIndex == CTRL_SEEK_BAR || isSeekingMode) {
       drawLargeBrackets(15, 192, 140, 14, COLOR_TEXT, 1);
     }
     
     drawTextProgressBar(22, 195, activeDisplayTime, trackTotalTime > 0 ? trackTotalTime : 1, 19, barColor);
 
-    // Control buttons row 1
     int row1Y = 228;
     gfx->setTextSize(2);
 
-    if (playerControlIndex == CTRL_PREV) {
+    if (playerControlIndex == CTRL_PREV && !isSeekingMode) {
       drawLargeBrackets(12, row1Y - 4, 38, 22, COLOR_TEXT, 2);
       gfx->setTextColor(COLOR_TEXT);
     } else {
@@ -704,7 +1250,7 @@ void renderCurrentScreen() {
     gfx->setCursor(18, row1Y);
     gfx->print("|<");
 
-    if (playerControlIndex == CTRL_PLAY_PAUSE) {
+    if (playerControlIndex == CTRL_PLAY_PAUSE && !isSeekingMode) {
       drawLargeBrackets(62, row1Y - 4, 38, 22, COLOR_TEXT, 2);
       gfx->setTextColor(COLOR_TEXT);
     } else {
@@ -713,7 +1259,7 @@ void renderCurrentScreen() {
     gfx->setCursor(68, row1Y);
     gfx->print(isPlaying ? "||" : " >");
 
-    if (playerControlIndex == CTRL_NEXT) {
+    if (playerControlIndex == CTRL_NEXT && !isSeekingMode) {
       drawLargeBrackets(120, row1Y - 4, 38, 22, COLOR_TEXT, 2);
       gfx->setTextColor(COLOR_TEXT);
     } else {
@@ -722,11 +1268,10 @@ void renderCurrentScreen() {
     gfx->setCursor(126, row1Y);
     gfx->print(">|");
 
-    // Control buttons row 2
     int row2Y = 262;
     gfx->setTextSize(1);
 
-    if (playerControlIndex == CTRL_SHUFFLE) {
+    if (playerControlIndex == CTRL_SHUFFLE && !isSeekingMode) {
       drawLargeBrackets(12, row2Y - 3, 64, 18, COLOR_TEXT, 2);
       gfx->setTextColor(COLOR_TEXT);
     } else {
@@ -735,7 +1280,7 @@ void renderCurrentScreen() {
     gfx->setCursor(18, row2Y);
     gfx->printf("SHUF:%s", isShuffle ? "ON" : "OFF");
 
-    if (playerControlIndex == CTRL_VOL) {
+    if (playerControlIndex == CTRL_VOL && !isSeekingMode) {
       drawLargeBrackets(92, row2Y - 3, 64, 18, COLOR_TEXT, 2);
       gfx->setTextColor(COLOR_TEXT);
     } else {
@@ -744,14 +1289,171 @@ void renderCurrentScreen() {
     gfx->setCursor(98, row2Y);
     gfx->printf("VOL:%d", currentVolume);
 
-    // DAC Hardware and Stream Diagnostic Message at screen bottom
-    if (!isDacWorking) {
+    if (isSeekingMode) {
+      gfx->drawFastHLine(10, 290, 150, COLOR_PRIMARY);
+      gfx->setTextColor(COLOR_TEXT);
+      gfx->setCursor(12, 298);
+      gfx->print("[PRESS DIAL TO APPLY]");
+    } else if (!isDacWorking && currentAudioMode == MODE_WIRED_DAC) {
       gfx->drawFastHLine(10, 290, 150, COLOR_PRIMARY);
       gfx->setTextColor(COLOR_TEXT);
       gfx->setCursor(12, 298);
       gfx->print("[!] CHECK DAC / WIRING");
     }
   } 
+  else if (currentState == BLUETOOTH_MENU) {
+    drawHeader("BLUETOOTH");
+    gfx->setTextSize(1);
+
+    gfx->setTextColor(COLOR_TEXT_MUTED);
+    gfx->setCursor(14, 40);
+    gfx->print("STATUS:");
+    gfx->setTextColor(COLOR_TEXT);
+    gfx->setCursor(14, 50);
+    gfx->println((currentAudioMode == MODE_BLUETOOTH) ? (isBtConnected ? "CONNECTED" : "PAIRING...") : "WIRED DAC");
+
+    gfx->setTextColor(COLOR_TEXT_MUTED);
+    gfx->setCursor(14, 68);
+    gfx->print("SAVED DEVS:");
+    gfx->setTextColor(COLOR_TEXT);
+    gfx->setCursor(14, 78);
+    gfx->printf("%d SAVED\n", savedBtCount);
+
+    const char* btOptions[] = {
+      "> CONNECT NEW", 
+      "> CONNECT SAVED", 
+      "> FORGET DEVICE", 
+      "> SWITCH TO DAC"
+    };
+
+    for (int i = 0; i < 4; i++) {
+      int y = 100 + (i * 24);
+      if (btMenuIndex == i) {
+        drawLargeBrackets(12, y - 3, 144, 16, COLOR_TEXT);
+        gfx->setTextColor(COLOR_TEXT);
+      } else {
+        gfx->setTextColor(COLOR_TEXT_MUTED);
+      }
+      gfx->setCursor(18, y);
+      gfx->println(btOptions[i]);
+    }
+
+    drawBtLogo(85, 238);
+  }
+  else if (currentState == BT_SCAN_RESULTS) {
+    drawHeader("BT SCAN");
+    gfx->setTextSize(1);
+
+    if (isScanningBt) {
+      gfx->setTextColor(COLOR_TEXT);
+      gfx->setCursor(14, 48);
+      gfx->println("SCANNING NEARBY...");
+      gfx->setCursor(14, 64);
+      gfx->printf("FOUND: %d DEVS\n", discoveredBtCount);
+      
+      int secondsLeft = 6 - ((millis() - scanStartTimer) / 1000);
+      drawTextProgressBar(14, 84, max(0, secondsLeft), 6, 19, COLOR_TEXT);
+    } else {
+      gfx->setTextColor(COLOR_TEXT_MUTED);
+      gfx->setCursor(14, 40);
+      gfx->printf("SELECT DEVICE (%d):", discoveredBtCount);
+    }
+
+    if (discoveredBtCount == 0 && !isScanningBt) {
+      gfx->setTextColor(COLOR_TEXT);
+      gfx->setCursor(14, 80);
+      gfx->println("NO DEVICES FOUND!");
+      gfx->setTextColor(COLOR_TEXT_MUTED);
+      gfx->setCursor(14, 100);
+      gfx->println("HOLD DIAL TO EXIT");
+      return;
+    }
+
+    int startY = isScanningBt ? 110 : 56;
+    for (int i = 0; i < discoveredBtCount; i++) {
+      int y = startY + (i * 24);
+      if (y > 270) break;
+
+      String name = discoveredBtList[i].name;
+      if (i == btListIndex && !isScanningBt) {
+        drawLargeBrackets(10, y - 3, 150, 16, COLOR_TEXT);
+        gfx->setTextColor(COLOR_TEXT);
+        if (name.length() > 14) {
+          int shift = scrollOffset % (name.length() - 12);
+          name = name.substring(shift, shift + 14);
+        }
+      } else {
+        gfx->setTextColor(COLOR_TEXT_MUTED);
+        if (name.length() > 14) name = name.substring(0, 12) + "..";
+      }
+
+      gfx->setCursor(14, y);
+      gfx->println(name);
+    }
+  }
+  else if (currentState == BT_SAVED_LIST) {
+    drawHeader("SAVED DEVS");
+    gfx->setTextSize(1);
+
+    if (savedBtCount == 0) {
+      gfx->setTextColor(COLOR_TEXT_MUTED);
+      gfx->setCursor(14, 60);
+      gfx->println("NO SAVED DEVICES.");
+      gfx->setCursor(14, 80);
+      gfx->println("PAIR NEW DEVICE FIRST.");
+      return;
+    }
+
+    for (int i = 0; i < savedBtCount; i++) {
+      int y = 50 + (i * 28);
+      String name = savedBtList[i].name;
+
+      if (i == btListIndex) {
+        drawLargeBrackets(10, y - 3, 150, 18, COLOR_TEXT);
+        gfx->setTextColor(COLOR_TEXT);
+        if (name.length() > 14) {
+          int shift = scrollOffset % (name.length() - 12);
+          name = name.substring(shift, shift + 14);
+        }
+      } else {
+        gfx->setTextColor(COLOR_TEXT_MUTED);
+        if (name.length() > 14) name = name.substring(0, 12) + "..";
+      }
+
+      gfx->setCursor(16, y);
+      gfx->println(name);
+    }
+  }
+  else if (currentState == BT_FORGET_LIST) {
+    drawHeader("FORGET DEV");
+    gfx->setTextSize(1);
+
+    if (savedBtCount == 0) {
+      gfx->setTextColor(COLOR_TEXT_MUTED);
+      gfx->setCursor(14, 60);
+      gfx->println("NO DEVICES TO FORGET.");
+      return;
+    }
+
+    gfx->setTextColor(COLOR_TEXT_MUTED);
+    gfx->setCursor(14, 40);
+    gfx->println("SELECT TO REMOVE:");
+
+    for (int i = 0; i < savedBtCount; i++) {
+      int y = 60 + (i * 28);
+      String name = savedBtList[i].name;
+
+      if (i == btListIndex) {
+        drawLargeBrackets(10, y - 3, 150, 18, COLOR_TEXT);
+        gfx->setTextColor(COLOR_TEXT);
+      } else {
+        gfx->setTextColor(COLOR_TEXT_MUTED);
+      }
+
+      gfx->setCursor(16, y);
+      gfx->println(name);
+    }
+  }
   else if (currentState == SETTINGS) {
     drawHeader("CONFIG");
 
@@ -759,26 +1461,22 @@ void renderCurrentScreen() {
     if (settingsIndex == 0) {
       drawLargeBrackets(8, 48, 152, 16, COLOR_TEXT);
       gfx->setTextColor(COLOR_TEXT);
-      gfx->setCursor(16, 51);
-      gfx->print("BL LEVEL");
     } else {
       gfx->setTextColor(COLOR_TEXT_MUTED);
-      gfx->setCursor(16, 51);
-      gfx->print("BL LEVEL");
     }
+    gfx->setCursor(16, 51);
+    gfx->print("BL LEVEL");
 
     drawTextProgressBar(22, 71, brightness, 255, 19, settingsIndex == 0 ? COLOR_TEXT : COLOR_TEXT_MUTED);
 
     if (settingsIndex == 1) {
       drawLargeBrackets(8, 102, 152, 16, COLOR_TEXT);
       gfx->setTextColor(COLOR_TEXT);
-      gfx->setCursor(16, 105);
-      gfx->print("PALETTE THEME");
     } else {
       gfx->setTextColor(COLOR_TEXT_MUTED);
-      gfx->setCursor(16, 105);
-      gfx->print("PALETTE THEME");
     }
+    gfx->setCursor(16, 105);
+    gfx->print("PALETTE THEME");
 
     gfx->setTextColor(COLOR_TEXT);
     gfx->setCursor(16, 123);
@@ -801,15 +1499,31 @@ void renderCurrentScreen() {
   }
 }
 
-void scanSDCatalog() {
-  File root = SD.open("/");
+void scanSDCatalog(int batchOffset) {
   fileCount = 0;
-  
+  int mp3IndexCounter = 0;
+
+  SD.end();
+  delay(10);
+  if (!SD.begin(SD_CS, SPI, 4000000)) {
+    sdStatus = 0;
+    resetNowPlayingState();
+    return;
+  }
+
+  File root = SD.open("/");
+  if (!root) {
+    sdStatus = 0;
+    resetNowPlayingState();
+    return;
+  }
+
   while (File entry = root.openNextFile()) {
+    delay(1); 
     if (!entry.isDirectory()) {
       String name = String(entry.name());
       if (name.endsWith(".mp3") || name.endsWith(".MP3")) {
-        if (fileCount < MAX_FILES) {
+        if (mp3IndexCounter >= batchOffset && fileCount < MAX_FILES) {
           mp3Catalog[fileCount].filename = name;
           mp3Catalog[fileCount].sizeBytes = entry.size();
           
@@ -832,23 +1546,44 @@ void scanSDCatalog() {
           }
           fileCount++;
         }
+        mp3IndexCounter++;
       }
     }
     entry.close();
   }
   root.close();
+  totalMp3sFound = mp3IndexCounter;
+  Serial.printf("[SD CATALOG] Found %d MP3 files total. Loaded batch of %d.\n", totalMp3sFound, fileCount);
+
+  if (fileCount == 0) {
+    resetNowPlayingState();
+  } else {
+    sdStatus = 2;
+  }
 }
 
 void playTrack(int index) {
   if (index >= 0 && index < fileCount) {
-    String path = "/" + mp3Catalog[index].filename;
+    stopAudioDecoder();
+
+    String filepath = "/" + mp3Catalog[index].filename;
+    Serial.printf("[PLAYER] Playing track: %s\n", filepath.c_str());
+
+    audioFile = new AudioFileSourceSD(filepath.c_str());
+    mp3Gen = new AudioGeneratorMP3();
+
+    if (currentAudioMode == MODE_WIRED_DAC) {
+      if (audioOut == nullptr) setupI2SDac();
+      mp3Gen->begin(audioFile, audioOut);
+    } else {
+      mp3Gen->begin(audioFile, nullptr);
+    }
+
     currentTrackName = mp3Catalog[index].title;
+    trackCurrentTime = 0;
     trackTotalTime = 0; 
-    
     playbackAttempted = true;
     dacCheckTimer = millis();
     isDacWorking = true;
-
-    audio.connecttoFS(SD, path.c_str());
   }
 }
