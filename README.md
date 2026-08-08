@@ -1,8 +1,8 @@
 <div align="center">
 
-# 🥚 Egg-MP3
+# 🥚 Egg-Thingy
 
-**A retro-styled, highly customizable ESP32 handheld audio player based on the Snowsky Echo Mini/Nano.**
+**A retro-styled, highly customizable ESP32 clip-on audio accessory based on the spotify car thing.**
 
 [![ESP32](https://img.shields.io/badge/Hardware-ESP32--1732S019N-orange?style=for-the-badge&logo=espressif)](https://www.espressif.com/)
 [![Arduino](https://img.shields.io/badge/Framework-Arduino_GFX-blue?style=for-the-badge&logo=arduino)](https://github.com/moononournation/Arduino_GFX)
@@ -10,7 +10,7 @@
 
 ---
 
-*Compact MP3 player based on the ESP32-1732S019N display module AKA "The Cheap Yellow Display".*
+*Based on a weird variant ESP32-1732S019N display module with a base ESP32 (No S3) AKA "The Cheap Yellow Display".*
 
 </div>
 
@@ -21,8 +21,7 @@
 * **🎨 Custom Color Palettes:** Includes 6 dark-mode color themes (*Slate Blue, Burnt Orange, Crimson Red, Pastel Pink, Forest Green, Deep Purple*).
 * **Aesthetic Layout:** Custom retro style theme, minimalist layout and display brightness adjustments.
 * **Tactile Input:** Native rotary encoder navigation with debounced step movement and long-press detection.
-* **3.5mm Audio Output:** High-quality audio playback via **PCM5102A I2S DAC** module.
-* **SD Card Integration:** Auto-scans root directory for `.mp3` tracks with real-time scrolling lists.
+* **Bluetooth Connection** Connects to your device via bluetooth, allows pause/play/next song/prev song controls and displays current song info.
 
 ---
 
@@ -41,15 +40,6 @@
 
 ## 📌 Pinout Mapping
 
-### PCM5102A I2S DAC
-| Module Pin | ESP32 Pin | Function |
-| :--- | :--- | :--- |
-| **BCK** | `GPIO26` | Bit Clock |
-| **LRCK / LCK** | `GPIO25` | Left/Right Clock (Word Select) |
-| **DIN** | `GPIO22` | Data Input |
-| **VCC** | `3.3V` | Power Supply |
-| **GND** | `GND` | Ground |
-
 ### KY-040 Rotary Encoder
 | Module Pin | ESP32 Pin | Function |
 | :--- | :--- | :--- |
@@ -59,7 +49,7 @@
 | **VCC / +** | `3.3V` | Power Supply |
 | **GND** | `GND` | Ground |
 
-### Display (ST7789) - HSPI Bus
+### Built in Display (ST7789) - HSPI Bus
 | Pin Description | ESP32 Pin |
 | :--- | :--- |
 | **Display Backlight (TFT_BL)** | `GPIO21` |
@@ -69,23 +59,13 @@
 | **SPI Clock (TFT_SCLK)** | `GPIO14` |
 | **SPI MOSI (TFT_MOSI)** | `GPIO13` |
 
-### SD Card Reader - Dedicated VSPI Bus (Independent)
-| SD Card Pin | ESP32 Pin | Function |
-| :--- | :--- | :--- |
-| **SCK** | `GPIO18` | VSPI Clock |
-| **MISO** | `GPIO19` | VSPI Master In Slave Out |
-| **MOSI** | `GPIO23` | VSPI Master Out Slave In |
-| **CS** | `GPIO5` | Chip Select |
-| **VCC** | `3.3V` | Power Supply |
-| **GND** | `GND` | Ground |
-
 ---
 
 ## 🎮 Controls 🎮
 
 * **Turn Knob:** Scroll through catalog lists, adjust volume, or change brightness levels.
 * **Short Press:** Select menu item / confirm setting.
-* **Long Press (0.5s):** Return to previous menu / Main Menu.
+* **Long Press:** Return to previous menu / Main Menu.
 
 ---
 
@@ -94,9 +74,7 @@
 Ensure you have the following libraries installed in your Arduino IDE / PlatformIO environment:
 
 * [Arduino_GFX_Library](https://github.com/moononournation/Arduino_GFX)
-* [ESP32-audioI2S](https://github.com/schreibfaul1/ESP32-audioI2S)
-* `SPI.h`
-* `SD.h`
+* [ESP32-A2DP](https://github.com/pschatzmann/ESP32-A2DP)
 
 ---
 
